@@ -1,22 +1,22 @@
-# 云与本地根（按你的实际改）
 blob:
   container: "jackson"
-  prefix: "js_exp"              # 你定的云上根
+  prefix: "js_exp"
 local:
-  root: "/mnt/data/js"          # 本地数据根（建议挂数据盘）
+  root: "/mnt/data/js"
 
-# 相对路径（相对于 blob.prefix 与 local.root）
+exp_root: "exp/v1"   # 只在这里写一次版本
+
 paths:
   raw:        "raw"
-  clean:      "clean"
-  raw_shards: "exp/v1/raw_shards"
-  fe_shards:  "exp/v1/fe_shards"
-  mm_shards:  "exp/v1/mm_shards"
-  mm_local:   "exp/v1/mm"
-  models:     "exp/v1/models"
-  reports:    "exp/v1/reports"
-  tmp_local:  "exp/v1/tmp"
+  clean:      "clean" # in exp_root
+  raw_shards: "raw_shards" # in exp_root
+  fe_shards:  "fe_shards" # in exp_root
+  models:     "models" # in exp_root
+  reports:    "reports" # in exp_root
+  # 本地专用
+  mm:         "mm"
   cache:      "cache"
+  tmp:        "tmp"
 
 # 关键列与时间范围
 keys: ["symbol_id","date_id","time_id"]
@@ -25,3 +25,5 @@ weight: "weight"
 date_lo: 1190
 date_hi: 1429
 embargo_days: 3
+
+test_lo: 1530
