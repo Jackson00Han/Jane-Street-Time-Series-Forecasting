@@ -24,8 +24,16 @@ paths:
 keys: ["symbol_id","date_id","time_id"]
 target: "responder_6"
 weight: "weight"
+
+# 时间特征列参数
+
+close_auction_ticks: 5
+ticks: 968
+bucket_size: 6
+white_list: ["time_pos", "time_sin", "time_cos", "time_bucket_6", "is_open_auction", "is_close_auction"] # NB: 6 here must match bucket_size
+
 date_lo: 1190
 date_hi: 1429
-embargo_days: 3
+embargo_days: 5
 
 test_lo: 1530
