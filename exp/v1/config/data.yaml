@@ -9,13 +9,15 @@ exp_root: "exp/v1"   # 只在这里写一次版本
 paths:
   raw:        "raw"
   clean:      "clean" # in exp_root
-  clean_shards: "clean_shards" # in exp_root
+  clean_shards: "clean_shards" # in exp_root 用来存放清洗后的分片数据，为后续特征工程做准备
   fe_shards:  "fe_shards" # in exp_root
   sample_fe: "sample_fe" # in exp_root
+  panel_shards: "panel_shards" # in exp_root
   models:     "models" # in exp_root
   reports:    "reports" # in exp_root
   # 本地专用
   sample_mm: "sample_mm" # in local root
+  panel_mm:  "panel_mm"  # in local root
   mm:         "mm"
   cache:      "cache"
   tmp:        "tmp"
