@@ -60,26 +60,36 @@ dates:
 
 # --------- 交易时序参数（影响填充/窗口等） ---------
 trading:
-  ticks: 968
-  open_auction_ticks: 5                  # 开盘集合竞价长度（用于跨日 TTL 生效窗口）
-  close_auction_ticks: 5
+  ticks: 968 # 最大日tick数（从0-967）
+  #open_auction_ticks: 5                  # 开盘集合竞价长度（用于跨日 TTL 生效窗口）
+  #close_auction_ticks: 5                 # 收盘集合竞价长度（用于跨日 TTL 生效窗口）
   bucket_size: 6                         # 用于 time_bucket_{K}
 
 # --------- 缺失值填充策略 ---------
 fill:
-  ttl_ticks: 3                           # 跨日承接的“存活上限”tick 数（仅开盘短窗内生效）
-  ffill_max_span: 64                     # 日内向前填充的最大跨度；超出仍视为缺失
-  order: ["crossday_ttl_then_intraday_ffill"]   # 固定顺序：先跨日TTL，后日内ffill
+  open_tick_window: [0, 10]          # 半开区间 [0,10)
+  ttl_days_open: 14                 # 开盘跨日承接 TTL（天）
+  intra_ffill_max_gap_ticks: 300     # 日内向前填补的最大跨度（tick）
+  ttl_days_same_tick: 14            # 同一 time_id 跨日承接 TTL（天，None 关闭）
+  order:
+    - "open_ttl"                     # 步骤1
+    - "intraday_ffill"               # 步骤2
+    - "same_tick_ttl"                # 步骤3（可选）
+    - "intraday_ffill"               # 步骤4（再传播）
+
 
 # --------- 极端值处理（Winsorize/截断） ---------
 winsorization:
-  method: "zscore"                       # "zscore" | "quantile"
+  method: "zscore"          # 这一步走 zscore
+  groupby: ["symbol_id", "time_bucket"]    # 如发现强日内季节性可改为 ["symbol_id","time_id"]
   z_k: 3
-  q_low: 0.005
-  q_high: 0.995
-  groupby: ["symbol_id"]                 # 如存在强季节性，可改 ["symbol_id","time_id"]
-  min_warmup_days: 20                    # 扩张窗口的热身天数
-  clip_exclude: ["responder_6", "weight"]# 禁止截断的列
+  ddof: 1
+  window: 480
+  min_valid: 10
+  cast_float32: true
+  sanitize: true                     # 是否先将 inf/-inf 替换为 null
+
+
 
 # --------- 列级白名单（强约束，防止隐形泄露） ---------
 column_policies:
@@ -90,9 +100,9 @@ column_policies:
     - "time_pos"
     - "time_sin"
     - "time_cos"
-    - "time_bucket_6"                    # 若 bucket_size 改为K，列名需改为 time_bucket_K
-    - "is_open_auction"
-    - "is_close_auction"
+    - "time_bucket"                    # 若 bucket_size 改为K，列名需改为 time_bucket_K
+    #- "is_open_auction"
+    #- "is_close_auction"
 
 # --------- 断言（启动即校验，早失败） ---------
 assertions:
