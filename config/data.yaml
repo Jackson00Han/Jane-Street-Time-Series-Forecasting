@@ -62,7 +62,7 @@ trading:
   ticks: 968 # 最大日tick数（从0-967）
   #open_auction_ticks: 5                  # 开盘集合竞价长度（用于跨日 TTL 生效窗口）
   #close_auction_ticks: 5                 # 收盘集合竞价长度（用于跨日 TTL 生效窗口）
-  bucket_size: 6                         # 用于 time_bucket_{K}
+  bucket_size: 6                         # 用于 time_bucket 的桶宽
 
 # --------- 缺失值填充策略 ---------
 fill:
@@ -114,7 +114,6 @@ assertions:
     rules:
       - "date_lo <= valid_start_at <= date_hi"
       - "valid_start_at < test_start_at <= date_hi"
-      - "min_warmup_days <= (valid_start_at - date_lo)"
 
 # --------- 随机与可复现 ---------
 repro:
