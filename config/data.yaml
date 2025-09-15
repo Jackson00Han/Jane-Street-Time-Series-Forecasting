@@ -2,9 +2,17 @@
 # Jane Street 项目全局配置
 # =========================
 
+
 # 版本与根
 exp_root: "exp/v1"          # 切版本只改这里
 
+# -----------------------------
+# I/O 配置
+# -----------------------------
+io:
+  backend: azure        # local | azure   ← 在这里切换
+
+# 云端配置（Azure Blob Storage）
 blob:
   container: "jackson"
   prefix: "js_exp"          # 云端容器内的项目前缀
@@ -12,30 +20,27 @@ blob:
 local:
   root: "/mnt/data/js"      # 本地数据根目录
 
-# 目录（除了raw, 其他均为相对 exp_root 的相对路径；实际使用：P(kind, cfg.exp_root, cfg.paths.clean)）
+# 目录
 paths:
-  raw:          "raw" # 在blob/container/prefix内的相对路径
+  raw_root:          "raw" # 在blob/container/prefix内的相对路径
 
-
+  # 相对 exp_root 的相对路径
   raw_shards:   "raw_shards"
   clean_shards: "clean_shards"          # 清洗后分片，供特征工程
-  clean_shards_pad: "clean_shards_pad"      # 清洗后分片，含填充
   fe_shards:    "fe_shards"             # 特征分片
   sample_fe:    "sample_fe"             # 采样后的特征（可选）
   panel_shards: "panel_shards"          # 面板化分片
-  mm:           "mm"                    # 全量内存映射
-  mm_shards:    "mm_shards"             # 分片内存映射（可选）
+
+  mm:           "mm"                    # 全量内存映射 （本地）
+  mm_shards:    "mm_shards"             # 分片内存映射（本地）
   sample_mm:    "sample_mm"             # 采样内存映射（本地）
   panel_mm:     "panel_mm"              # 面板内存映射（本地）
+
   models:       "models"
   reports:      "reports"
   cache:        "cache"
   tmp:          "tmp"
 
-io:
-  use_simplecache: true                 # 读云端小文件建议启用：simplecache::az://...
-  max_workers: 8                        # 并发上限（上层控制）
-  # cache_dir 默认复用 paths.cache
 
 # 关键列与目标
 keys: ["symbol_id", "date_id", "time_id"]
@@ -54,18 +59,16 @@ schema:                                  # 仅用于启动时的快速校验
 
 # --------- 数据时间范围与切分 ---------
 dates:
-  date_lo: 1190
-  date_hi: 1429
-  valid_start_at: 1400                   # 验证集起始（含）
-  test_start_at: 1410                    # 测试集起始（含）
-  embargo_days: 5                        # 训练/验证/测试间的禁运天数（防泄露）
+  date_lo: 1000
+  date_hi: 1100
+
 
 # --------- 交易时序参数（影响填充/窗口等） ---------
 trading:
   ticks: 968 # 最大日tick数（从0-967）
+  bucket_size: 6                         # 用于 time_bucket 的桶宽
   #open_auction_ticks: 5                  # 开盘集合竞价长度（用于跨日 TTL 生效窗口）
   #close_auction_ticks: 5                 # 收盘集合竞价长度（用于跨日 TTL 生效窗口）
-  bucket_size: 6                         # 用于 time_bucket 的桶宽
 
 # --------- 缺失值填充策略 ---------
 fill:
