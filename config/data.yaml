@@ -41,6 +41,8 @@ io:
 keys: ["symbol_id", "date_id", "time_id"]
 target: "responder_6"
 weight: "weight"
+sorts:
+  time_major: ["date_id", "time_id", "symbol_id"]
 
 schema:                                  # 仅用于启动时的快速校验
   keys:
@@ -99,11 +101,11 @@ feature_eng:
     is_sorted: false
     prev_soft_days: 7
     cast_f32: true
-    # 适度的尾部滞后，不再拉到 512/960
-    tail_lags: [1, 2, 4, 8, 16, 32, 64, 128]
-    tail_diffs: [1, 4, 16]
+    # 适度的尾部滞后
+    tail_lags: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 967]
+    tail_diffs: [1, 4, 16, 64]
     # 日度滚动：短中长三档
-    rolling_windows: [5, 20, 60]
+    rolling_windows: [3, 5, 7, 14]
 
   B:
     enabled: true
@@ -122,11 +124,11 @@ feature_eng:
     cast_f32: true
     batch_size: 10
     # 适度的历史派生
-    lags: [1, 2, 4, 8, 16]
-    ret_periods: [1, 4]
-    diff_periods: [1]
-    rz_windows: [5, 20, 60]
-    ewm_spans: [10, 30]
+    lags: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 967]
+    ret_periods: [1, 4, 8, 16]
+    diff_periods: [1, 2, 4, 8, 16]
+    rz_windows: [3, 5, 7, 14]
+    ewm_spans: [5, 10, 30, 60]
     keep_rmean_rstd: true
     cs_cols: []              # 若后续要做截面rank，再指定列名
 
@@ -157,6 +159,10 @@ assertions:
       - "date_lo <= valid_start_at <= date_hi"
       - "valid_start_at < test_start_at <= date_hi"
 
+debug:
+  check_time_monotone: true   # 开发期开；批量/生产可关
+
+  
 # --------- 随机与可复现 ---------
 repro:
   seed: 42
