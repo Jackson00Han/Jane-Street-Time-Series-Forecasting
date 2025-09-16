@@ -1,13 +1,17 @@
 # run_fe.py
 from __future__ import annotations
 from pathlib import Path
+import re
+import gc
+
 import polars as pl
 import numpy as np
-import gc
+from tqdm.auto import tqdm  # ✅ 进度条
+
 from pipeline.io import cfg, fs, storage_options, P, ensure_dir_az
 from pipeline.features import run_staged_engineering, StageA, StageB, StageC
 from pipeline.validate import assert_panel_shard
-import re
+
 
 # ---------- small utils ----------
 def azify(p: str) -> str:
@@ -15,9 +19,10 @@ def azify(p: str) -> str:
     return p if p.startswith("az://") else f"az://{p}"
 
 
-
 def main():
-    # ----- constants & columns -----
+    # ==============================
+    # 0) 常量与列名
+    # ==============================
     FEATURE_ALL = [f"feature_{i:02d}" for i in range(79)]
     RESP_COLS   = [f"responder_{i}" for i in range(9)]
     KEYS        = tuple(cfg["keys"])
@@ -25,28 +30,35 @@ def main():
     TARGET, WEIGHT = cfg["target"], cfg["weight"]
     TB = cfg['time_bucket']
     TIME_SORT = cfg['sorts']['time_major']
-    
-    # ticks 读取
+
+    # ticks
     T = np.float32(cfg["trading"]["ticks"])
-    TWOPI_over_T = np.float32(2.0*np.pi) / T     # 全是 float32
+    TWOPI_over_T = np.float32(2.0*np.pi) / T
     twopi_over_T_lit = pl.lit(TWOPI_over_T, dtype=pl.Float32)
-    
-    # ----- read shards -----
+
+    # ==============================
+    # 1) 路径与读取 clean shards
+    # ==============================
     clean_root = azify(P("az", cfg["paths"]["clean_shards"]))
     fe_root    = azify(P("az", cfg["paths"]["fe_shards"]))
     panel_root = azify(P("az", cfg["paths"]["panel_shards"]))
     ensure_dir_az(fe_root)
     ensure_dir_az(panel_root)
-    
+
     clean_paths = [azify(p) for p in sorted(fs.glob(f"{clean_root}/*.parquet"))]
     if not clean_paths:
-        raise FileNotFoundError(f"No clean shards under {clean_root}")  
+        raise FileNotFoundError(f"No clean shards under {clean_root}")
+
     lc = pl.scan_parquet(clean_paths, storage_options=storage_options)
-    # 如有需要，可以筛选日期范围 lc = lc.filter(pl.col(g_date).is_between(...))
-    
-    days = lc.select(pl.col(g_date).unique().sort()).collect(streaming=True)[g_date].to_list()
-        
-    # ----- build stages from cfg -----
+    days = (
+        lc.select(pl.col("date_id").unique().sort())
+          .collect(streaming=True)["date_id"]
+          .to_list()
+    )
+
+    # ==============================
+    # 2) 读取/构建 A/B/C 阶段配置
+    # ==============================
     fea = cfg.get("feature_eng", {})
     A_cfg = fea.get("A", {})
     B_cfg = fea.get("B", {})
@@ -87,27 +99,33 @@ def main():
             is_sorted=C_cfg.get("is_sorted", False),
             cast_f32=C_cfg.get("cast_f32", True),
         ) if C_enabled else None)
-    
-    
-    # -------- FE shard loop: read [pad_lo..core_hi], write only [core_lo..core_hi] --------
-    PAD_DAYS = int(fea.get("fe_pad_days", 30))
-    CORE_DAYS = int(fea.get("fe_core_days", 30))
 
-    for start in range(PAD_DAYS, len(days), CORE_DAYS):
+    # ==============================
+    # 3) FE 按片生成：读 [pad_lo..core_hi]，仅写 [core_lo..core_hi]
+    # ==============================
+    ensure_dir_az(fe_root)
+    PAD_DAYS  = int(fea.get('fe_pad_days', 30))
+    CORE_DAYS = int(fea.get('fe_core_days', 30))
+
+    total_fe_batches = max(0, ((len(days) - PAD_DAYS) + CORE_DAYS - 1) // CORE_DAYS)
+    for start in tqdm(range(PAD_DAYS, len(days), CORE_DAYS),
+                      total=total_fe_batches, desc="FE shards (A/B/C)"):
         core_lo_idx = start
-        core_hi_idx = min(start + CORE_DAYS - 1, len(days) - 1) # 闭区间
-        pad_lo_idx = core_lo_idx - PAD_DAYS
-        
+        core_hi_idx = min(start + CORE_DAYS - 1, len(days) - 1)  # 闭区间
+        pad_lo_idx  = core_lo_idx - PAD_DAYS
+
         core_lo, core_hi = days[core_lo_idx], days[core_hi_idx]
         pad_lo = days[pad_lo_idx]
-        
-        # 仅读本片+pad的输入 （懒加载）
-        lf_shard = (lc.filter(pl.col(g_date).is_between(pad_lo, core_hi))
-                    .select([*cfg['keys'], cfg['weight'], TB, *RESP_COLS, *FEATURE_ALL]))
-        # 输出目录
+
+        # 仅读本片+pad 的输入（懒加载）
+        lf_shard = (
+            lc.filter(pl.col(g_date).is_between(pad_lo, core_hi))
+              .select([*cfg['keys'], cfg['weight'], TB, *RESP_COLS, *FEATURE_ALL])
+        )
+
         out_dir = azify(f"{fe_root}/fe_{core_lo:04d}_{core_hi:04d}")
         ensure_dir_az(out_dir)
-        
+
         run_staged_engineering(
             lf_base = lf_shard,
             keys = cfg['keys'],
@@ -117,18 +135,18 @@ def main():
             A = A,
             B = B,
             C = C,
-            write_date_between=(core_lo, core_hi)
-            )
+            write_date_between=(core_lo, core_hi),
+        )
         print(f"[FE] days {core_lo}..{core_hi} (pad from {pad_lo}) -> {out_dir}")
-        
-    # -------- stitch A/B/C into panel shards --------
 
+    # ==============================
+    # 4) 拼接 A/B/C → Panel 分片
+    # ==============================
     DATE_LO, DATE_HI = cfg['dates']['train_lo'], cfg['dates']['train_hi']
     print(f"DATE_LO: {DATE_LO}, DATE_HI: {DATE_HI}")
 
-    # 列出 fe 分片目录，并解析窗口
-    shard_dirs = [p for p in fs.glob(f"{fe_root}/*")]
-    shard_dirs = [azify(p) for p in sorted(shard_dirs)]
+    # 解析 fe 分片窗口
+    shard_dirs = [azify(p) for p in sorted(fs.glob(f"{fe_root}/*"))]
     wins: list[tuple[int,int]] = []
     for p in shard_dirs:
         base = p.rstrip("/").split("/")[-1]  # e.g. fe_1030_1059
@@ -140,71 +158,66 @@ def main():
             wins.append((lo, hi))
     wins = sorted(set(wins))
     print(f"windows in range: {wins[:5]} ... (total {len(wins)})")
-    
-    # 预备：把 clean 作为基表源（一次 cast 即可）
+
+    # 基表（clean）作为 join 基础，统一 cast key
     cast_keys = [pl.col(k).cast(pl.Int32).alias(k) for k in KEYS]
-    lc_base = pl.scan_parquet(clean_paths, storage_options=storage_options).with_columns(cast_keys)
-    
-    # 构造 base 选择器（一次性加时间特征
+    lc_base = (
+        pl.scan_parquet(f"{clean_root}/*.parquet", storage_options=storage_options)
+          .with_columns(cast_keys)
+    )
     ti_f = pl.col(g_time).cast(pl.Float32)
-    
-    for (lo, hi) in wins:
+
+    for (lo, hi) in tqdm(wins, desc="Stitch panel shards"):
         # 与全局区间取交集，防止边缘窗口越界
         w_lo, w_hi = max(lo, DATE_LO), min(hi, DATE_HI)
-        
         shard_name = f"fe_{lo:04d}_{hi:04d}"
         fe_dir = azify(f"{fe_root}/{shard_name}")
+
         # 基表（筛行 + 选列 + 时间三件套）
         lf = (
             lc_base.filter(pl.col("date_id").is_between(w_lo, w_hi))
-            .select([*KEYS, TB, TARGET, WEIGHT, *FEATURE_ALL])
-            .with_columns([
-                ti_f.alias("time_pos"),
-                (ti_f * twopi_over_T_lit).alias("_phase_").cast(pl.Float32),
-            ])
-            .with_columns([
-                # 兼容旧版：对表达式调用 .sin() / .cos()
-                pl.col("_phase_").sin().cast(pl.Float32).alias("time_sin"),
-                pl.col("_phase_").cos().cast(pl.Float32).alias("time_cos"),
-            ])
-            .drop(["_phase_"])
+                   .select([*KEYS, TB, TARGET, WEIGHT, *FEATURE_ALL])
+                   .with_columns([
+                       ti_f.alias("time_pos"),
+                       (ti_f * twopi_over_T_lit).alias("_phase_").cast(pl.Float32),
+                   ])
+                   .with_columns([
+                       pl.col("_phase_").sin().cast(pl.Float32).alias("time_sin"),
+                       pl.col("_phase_").cos().cast(pl.Float32).alias("time_cos"),
+                   ])
+                   .drop(["_phase_"])
         )
-        
 
         # A/B
-        A = pl.scan_parquet(f"{fe_dir}/stage_a.parquet", storage_options=storage_options).with_columns(cast_keys)
-        B = pl.scan_parquet(f"{fe_dir}/stage_b.parquet", storage_options=storage_options).with_columns(cast_keys)
-        
+        A_scan = pl.scan_parquet(f"{fe_dir}/stage_a.parquet", storage_options=storage_options).with_columns(cast_keys)
+        B_scan = pl.scan_parquet(f"{fe_dir}/stage_b.parquet", storage_options=storage_options).with_columns(cast_keys)
+
         # C（多文件）
         C_paths = [azify(p) for p in sorted(fs.glob(f"{fe_dir}/stage_c_*.parquet"))]
-        C_scans = [
-            pl.scan_parquet(p, storage_options=storage_options).with_columns(cast_keys)
-            for p in C_paths
-        ]
-        
-        # 逐个 join 
-        panel = lf.join(A, on=list(KEYS), how="left", suffix="_A")
-        panel = panel.join(B, on=list(KEYS), how="left", suffix="_B")
-        for C in C_scans:
+        C_scans = [pl.scan_parquet(p, storage_options=storage_options).with_columns(cast_keys) for p in C_paths]
+
+        # 逐个 join
+        panel = lf.join(A_scan, on=list(KEYS), how="left", suffix="_A")
+        panel = panel.join(B_scan, on=list(KEYS), how="left", suffix="_B")
+        for C in tqdm(C_scans, desc=f"Join C {shard_name}", leave=False):
             panel = panel.join(C, on=list(KEYS), how="left", suffix="_C")
-        
-        # 排序
+
         panel = panel.sort(TIME_SORT)
-        
-        # 收集并写盘
+
+        # 收集并写盘（Azure）
         df_out = panel.collect(streaming=True)
         out_path = f"{panel_root}/panel_{w_lo:04d}_{w_hi:04d}.parquet"
         with fs.open(out_path, "wb") as f:
             df_out.write_parquet(f, compression="zstd")
-            
         print(f"[panel] wrote {out_path} with {df_out.shape[0]} rows")
-        
+
+        # 片内时间单调性检查（可开关）
         if cfg.get("debug", {}).get("check_time_monotone", True):
             assert_panel_shard(out_path, w_lo, w_hi, date_col=g_date, time_col=g_time)
-            
+
         del df_out
         gc.collect()
 
+
 if __name__ == "__main__":
     main()
-        
