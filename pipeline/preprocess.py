@@ -2,10 +2,8 @@ from __future__ import annotations
 from typing import Sequence, Optional, Tuple
 import polars as pl
 
-
 def clip_upper(expr: pl.Expr, ub: int) -> pl.Expr:
     return pl.when(expr > pl.lit(ub)).then(pl.lit(ub)).otherwise(expr)
-
 
 def rolling_sigma_clip(
     lf: pl.LazyFrame,

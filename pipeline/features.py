@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence, Iterable, Optional, Tuple
 import polars as pl
+import numpy as np
+from pipeline.io import cfg, fs, storage_options, P
+from pipeline.validate import assert_time_monotone
 
 
 # 特征工程
@@ -511,15 +514,6 @@ class StageC:
     cast_f32: bool = True
     
 
-def assert_time_monotone(path, *, date_col="date_id", time_col="time_id"):
-    s = (pl.scan_parquet(path, storage_options=storage_options)
-           .select([
-               (pl.col(date_col).diff().fill_null(0) < 0).any().alias('date_drop'),
-               ((pl.col(date_col).diff().fill_null(0) == 0) &
-                (pl.col(time_col).diff().fill_null(0) < 0)).any().alias('time_drop')
-           ])
-           .collect(streaming=True))
-    assert not s['date_drop'][0] and not s['time_drop'][0]
 
 
 def run_staged_engineering(

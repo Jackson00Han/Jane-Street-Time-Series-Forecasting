@@ -6,6 +6,10 @@
 # 版本与根
 exp_root: "exp/v1"          # 切版本只改这里
 
+# --------- 随机与可复现 ---------
+seed: 42
+
+
 # -----------------------------
 # I/O 配置
 # -----------------------------
@@ -41,6 +45,7 @@ paths:
   cache:        "cache"
   tmp:          "tmp"
 
+  feature_list_path: "/mnt/data/js/exp/v1/models/feature_set/fs__1020-1100__cv2-g3-r9__seed42__top632__1758034774.txt"            # 特征列表路径
 
 # 关键列与目标
 keys: ["symbol_id", "date_id", "time_id"]
@@ -48,6 +53,9 @@ target: "responder_6"
 weight: "weight"
 sorts:
   time_major: ["date_id", "time_id", "symbol_id"]
+
+time_bucket: "time_bucket"           # 生成的时间桶列名（与 bucket_size 相关）
+
 
 schema:                                  # 仅用于启动时的快速校验
   keys:
@@ -61,6 +69,11 @@ schema:                                  # 仅用于启动时的快速校验
 dates:
   date_lo: 1000
   date_hi: 1100
+  train_lo: 1020
+  train_hi: 1100
+  feature_select_dates:
+    date_lo: 1040
+    date_hi: 1100
 
 
 # --------- 交易时序参数（影响填充/窗口等） ---------
@@ -94,8 +107,6 @@ winsorization:
   min_valid: 10
   cast_float32: true
   sanitize: true                     # 是否先将 inf/-inf 替换为 null
-
-
 
 
 feature_eng:
@@ -135,43 +146,51 @@ feature_eng:
     keep_rmean_rstd: true
     cs_cols: []              # 若后续要做截面rank，再指定列名
 
+  fe_pad_days: 30
+  fe_core_days: 30
+
+cv:
+  n_splits: 2
+  gap_days: 3
+  train_to_val: 9
 
 
+lgb_select:
+  device_type: gpu        # 或 cpu
+  learning_rate: 0.05
+  num_leaves: 63
+  max_depth: 8
+  feature_fraction: 0.80
+  bagging_fraction: 0.80
+  bagging_freq: 1
+  min_data_in_leaf: 200
+  num_boost_round: 4000
+  early_stopping_rounds: 100
+  log_period: 100
+  select_top_k: 600       # 导出前K特征
+
+lgb_train:
+  device_type: gpu        # 或 cpu
+  learning_rate: 0.05
+  num_leaves: 63
+  max_depth: 8
+  feature_fraction: 0.80
+  bagging_fraction: 0.80
+  bagging_freq: 1
+  min_data_in_leaf: 200
+  num_boost_round: 4000
+  early_stopping_rounds: 100
+  log_period: 100
+  final_boost_margin: 1.10
 
 # --------- 列级白名单（强约束，防止隐形泄露） ---------
-column_policies:
-  allow_crossday: []                     # 允许跨日TTL承接（谨慎添加，避免价量/盘口/回报）
-  intra_ffill_only: []                   # 仅允许“日内向前填充”的列（大部分价量盘口列放这里）
-  no_fill: []                            # 任何场景都不填（停牌/熔断/事件标志等）
-  time_features:                         # 仅示例；生成时按 bucket_size 同步命名
-    - "time_pos"
-    - "time_sin"
-    - "time_cos"
-    - "time_bucket"                    # 若 bucket_size 改为K，列名需改为 time_bucket_K
-    #- "is_open_auction"
-    #- "is_close_auction"
+white_list: ["time_pos", "time_sin", "time_cos", "time_bucket"]
 
-# --------- 断言（启动即校验，早失败） ---------
-assertions:
-  unique_key: true                       # (symbol_id, date_id, time_id) 唯一
-  time_monotonic: true                   # 组内时间非降
-  no_future_joins: true                  # 禁止 asof 到未来
-  split_bounds:
-    require: true
-    rules:
-      - "date_lo <= valid_start_at <= date_hi"
-      - "valid_start_at < test_start_at <= date_hi"
 
 debug:
   check_time_monotone: true   # 开发期开；批量/生产可关
 
   
-# --------- 随机与可复现 ---------
-repro:
-  seed: 42
-  deterministic_ops: true
+
 
 # --------- 报告与审计 ---------
-reports:
-  subdirs: ["metrics", "audits", "logs", "snapshots"]
-  write_path_snapshot: true              # 记录本次运行的路径快照（含 exp_root）

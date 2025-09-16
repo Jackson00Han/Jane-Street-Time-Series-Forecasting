@@ -36,6 +36,7 @@ def main():
         .sort(KEYS)
     )
     
+    # Clipping
     lf_clip = rolling_sigma_clip(
         lf=lb, 
         clip_features=FEATURE_ALL, 
@@ -51,7 +52,8 @@ def main():
     clip_out = Path(P("local", cfg["paths"]["cache"])) / "sample_clipped.parquet"; ensure_dir_local(clip_out.parent)
 
     lf_clip.collect().write_parquet(str(clip_out), compression="zstd")
-
+    
+    # Imputing
     lf_imp = (
         causal_impute(
             lf=pl.scan_parquet(clip_out.as_posix()).sort(KEYS),

@@ -1,16 +1,26 @@
 # pipeline/memmap.py
 from __future__ import annotations
-from typing import List
+from typing import List, Dict
 import os, json, time, gc
 import numpy as np
 import polars as pl
+from pipeline.io import storage_options  # 用于远端读取
 
-def shard2memmap(sorted_paths: List[str], feat_cols: List[str], prefix: str):
-    date_col, target_col, weight_col = "date_id", "responder_0", "weight"
+def shard2memmap(
+    sorted_paths: List[str],
+    feat_cols: List[str],
+    prefix: str,
+    *,
+    date_col: str = "date_id",
+    target_col: str = "responder_0",
+    weight_col: str = "weight",
+) -> Dict[str, str]:
+    """将若干已排序的 panel 分片堆叠成本地 memmap。"""
 
+    # 预扫行数
     counts = []
     for p in sorted_paths:
-        k = (pl.scan_parquet(p).select(pl.len()).collect(streaming=True).item())
+        k = pl.scan_parquet(p, storage_options=storage_options).select(pl.len()).collect(streaming=True).item()
         counts.append(int(k))
 
     n_rows, n_feat = int(sum(counts)), len(feat_cols)
@@ -22,9 +32,12 @@ def shard2memmap(sorted_paths: List[str], feat_cols: List[str], prefix: str):
     d = np.memmap(f"{prefix}_date.int32.mmap", dtype=np.int32,   mode="w+", shape=(n_rows,))
 
     need_cols = [date_col, target_col, weight_col, *feat_cols]
+
     ofs = 0
     for p, k in zip(sorted_paths, counts):
-        df = (pl.scan_parquet(p).select(need_cols).collect(streaming=True))
+        df = pl.scan_parquet(p, storage_options=storage_options).select(need_cols).collect(streaming=True)
+
+        # 转 numpy（零拷贝尽可能）
         X_block = df.select(feat_cols).to_numpy().astype(np.float32, copy=False)
         y_block = df.get_column(target_col).to_numpy().astype(np.float32, copy=False).ravel()
         w_block = df.get_column(weight_col).to_numpy().astype(np.float32, copy=False).ravel()
@@ -44,7 +57,7 @@ def shard2memmap(sorted_paths: List[str], feat_cols: List[str], prefix: str):
     meta = {
         "n_rows": int(n_rows),
         "n_feat": int(n_feat),
-        "dtype": {"X":"float32","y":"float32","w":"float32","date_id":"int32"},
+        "dtype": {"X": "float32", "y": "float32", "w": "float32", "date_id": "int32"},
         "features": list(feat_cols),
         "target": target_col,
         "weight": weight_col,
