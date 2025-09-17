@@ -4,9 +4,11 @@ import os, json, time, gc, hashlib
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
+from tqdm.auto import tqdm  # ✅ 进度条
 
 from pipeline.io import cfg, P, ensure_dir_local
 from pipeline.memmap import make_sliding_cv_fast
+
 
 # -------- utils --------
 def load_mm(prefix: str):
@@ -19,6 +21,7 @@ def load_mm(prefix: str):
     w = np.memmap(f"{prefix}_w.float32.mmap", dtype=np.float32, mode="r", shape=(N,))
     d = np.memmap(f"{prefix}_date.int32.mmap", dtype=np.int32,   mode="r", shape=(N,))
     return meta, X, y, w, d
+
 
 def lgb_wr2_eval(y_pred: np.ndarray, dataset: lgb.Dataset):
     y_true = dataset.get_label()
@@ -36,27 +39,32 @@ def lgb_wr2_eval(y_pred: np.ndarray, dataset: lgb.Dataset):
     wr2 = 1.0 - (ss_res / max(ss_tot, 1e-12))
     return "wr2", float(wr2), True   # higher is better
 
+
 def tag_for_fs(fs_lo:int, fs_hi:int, n_splits:int, gap:int, ratio:int, seed:int, top_k:int, ts:int):
     return f"fs__{fs_lo}-{fs_hi}__cv{n_splits}-g{gap}-r{ratio}__seed{seed}__top{top_k}__{ts}"
 
+
 def main():
-    # ---------- paths ----------
+    # =========================
+    # 0) 路径
+    # =========================
     mm_root   = P("local", cfg["paths"]["sample_mm"])
     prefix    = os.path.join(mm_root, "full_sample_v1")     # 与 run_memmap.py 保持一致
     rep_dir   = os.path.join(P("local", cfg["paths"]["reports"]), "fi")
-    featset_dir   = os.path.join(P("local", cfg.get("paths", {}).get("models", "exp/v1/models")), "feature_set")
+    featset_dir = os.path.join(P("local", cfg.get("paths", {}).get("models", "exp/v1/models")), "feature_set")
     ensure_dir_local(rep_dir); ensure_dir_local(featset_dir)
 
-    # ---------- load memmap ----------
+    # =========================
+    # 1) 载入 memmap
+    # =========================
     meta, X, y, w, d = load_mm(prefix)
     feat_cols = meta["features"]
     assert np.all(np.diff(d) >= 0), "memmap d 不是非降序；请检查 panel 分片或排序"
     print(f"[fs] N={meta['n_rows']:,}, F={meta['n_feat']}")
 
-
-
-    # ---------- sample date range  ----------
-    # 建议把范围放到 cfg 里：feature_select: { date_lo: 1000, date_hi: 1100 }
+    # =========================
+    # 2) 取用于筛选的日期子集
+    # =========================
     fs_cfg = cfg['dates']["feature_select_dates"]
     fs_lo = int(fs_cfg.get("date_lo", 1000))
     fs_hi = int(fs_cfg.get("date_hi", 1100))
@@ -70,24 +78,26 @@ def main():
 
     print(f"[fs] using date range [{fs_lo}, {fs_hi}] -> {subset_idx.size:,} rows")
 
-    # ---------- CV folds ----------
+    # =========================
+    # 3) 构建 CV
+    # =========================
     cv_cfg = cfg['cv']
     n_splits = int(cv_cfg.get("n_splits", 2))
-    gap_days = int(cv_cfg.get("gap_days", 5))
+    gap_days = int(cv_cfg.get("gap_days", 7))
     ratio    = int(cv_cfg.get("train_to_val", 9))
-    
+
     seed_val = int(cfg["seed"])
     top_k    = int(cfg["lgb_select"].get("top_k", 632))
     train_lo, train_hi = cfg["dates"]["train_lo"], cfg["dates"]["train_hi"]
-    
-    
-    folds = make_sliding_cv_fast(d_sub, n_splits = n_splits, gap_days = gap_days, train_to_val = ratio)
+
+    folds = make_sliding_cv_fast(d_sub, n_splits=n_splits, gap_days=gap_days, train_to_val=ratio)
     if not folds:
         raise RuntimeError("No CV folds constructed. Check cv settings and date order.")
     print(f"[fs] folds={len(folds)}, top_k={top_k}, seed={seed_val}")
 
-
-    # ---------- LightGBM params ----------
+    # =========================
+    # 4) LightGBM 参数
+    # =========================
     ds_params = dict(
         max_bin=63,
         bin_construct_sample_cnt=200000,
@@ -113,7 +123,9 @@ def main():
     es_rounds       = int(lgb_cfg.get("early_stopping_rounds", 100))
     log_period      = int(lgb_cfg.get("log_period", 100))
 
-    # ---------- dataset ----------
+    # =========================
+    # 5) 构造 Dataset
+    # =========================
     d_all = lgb.Dataset(
         X, label=y, weight=w,
         feature_name=feat_cols,
@@ -121,14 +133,19 @@ def main():
         params=ds_params,
     )
 
-    # ---------- training loop ----------
+    # =========================
+    # 6) 多折训练（带进度条）
+    # =========================
     scores = []
     fi = pd.DataFrame({"feature": feat_cols})
 
-    for k, (tr_idx, va_idx) in enumerate(folds, 1):
+    for k, (tr_idx, va_idx) in enumerate(tqdm(folds, desc="CV folds", unit="fold"), 1):
         print(f"[model] fold {k}/{len(folds)}: train={tr_idx.size:,}, val={va_idx.size:,}")
-        dtrain = d_all.subset(tr_idx, params=ds_params)
-        dvalid = d_all.subset(va_idx, params=ds_params)
+        tr_g = subset_idx[tr_idx]   # ← 映射到全量行号
+        va_g = subset_idx[va_idx]
+
+        dtrain = d_all.subset(tr_g, params=ds_params)
+        dvalid = d_all.subset(va_g, params=ds_params)
 
         bst = lgb.train(
             params, dtrain,
@@ -147,31 +164,29 @@ def main():
         fi[f"fold{k}_gain_share"] = (g / g.sum()) if g.sum() > 0 else np.zeros_like(g, dtype=float)
         bst.free_dataset(); del dtrain, dvalid, bst; gc.collect()
 
-
+    # =========================
+    # 7) 汇总 FI 并选特征
+    # =========================
     fi_cols = [c for c in fi.columns if c.startswith("fold")]
     fi["mean_gain_share"] = fi[fi_cols].mean(axis=1)
     fi = fi.sort_values("mean_gain_share", ascending=False, ignore_index=True)
 
-    # ---------- select features ----------
     whitelist = list(cfg.get("white_list", []))
     fi_normal = fi[~fi["feature"].isin(whitelist)].reset_index(drop=True)
     final_feats = list(dict.fromkeys(whitelist + fi_normal["feature"].head(top_k).tolist()))
     print(f"[fs] selected {len(final_feats)} features (whitelist {len(whitelist)})")
-    
 
-    # 输出
-    ts = int(time.time())
+    # =========================
+    # 8) 输出
+    # =========================
+    ts  = int(time.time())
     tag = tag_for_fs(fs_lo, fs_hi, n_splits, gap_days, ratio, seed_val, top_k, ts)
-    
-    # 报告目录
-    fi_path   = os.path.join(rep_dir, f"fi_gain_share__{tag}.csv")
-    lst_path  = os.path.join(rep_dir, f"features__{tag}.txt")
-    sum_path  = os.path.join(rep_dir, f"summary__{tag}.json")
 
-    # 同步一份“可被训练脚本引用”的特征清单
-    lst4train = os.path.join(featset_dir, f"{tag}.txt")
+    fi_path  = os.path.join(rep_dir,   f"fi_gain_share__{tag}.csv")
+    lst_path = os.path.join(rep_dir,   f"features__{tag}.txt")
+    sum_path = os.path.join(rep_dir,   f"summary__{tag}.json")
+    lst4train = os.path.join(featset_dir, f"{tag}.txt")  # 同步一份可供训练脚本引用的清单
 
-    # 写文件
     fi[["feature", "mean_gain_share"]].to_csv(fi_path, index=False)
     with open(lst_path, "w", encoding="utf-8") as f:
         for x in final_feats:
@@ -179,8 +194,7 @@ def main():
     with open(lst4train, "w", encoding="utf-8") as f:
         for x in final_feats:
             f.write(f"{x}\n")
-    
-    # 摘要
+
     summary = {
         "cv_scores": scores,
         "cv_mean_wr2": float(np.mean(scores)),
@@ -208,6 +222,7 @@ def main():
     print(f"[fs][done] FI -> {fi_path}")
     print(f"[fs][done] features -> {lst_path} (and {lst4train})")
     print(f"[fs][done] summary -> {sum_path}")
+
 
 if __name__ == "__main__":
     main()

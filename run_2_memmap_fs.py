@@ -1,4 +1,4 @@
-# run_memmap.py
+# run_memmap_fs.py
 from __future__ import annotations
 
 import os
@@ -21,7 +21,7 @@ def main():
     # =============================
     # 0) 读取配置 & I/O 根路径
     # =============================
-    DATE_LO, DATE_HI = cfg["dates"]["train_lo"], cfg["dates"]["train_hi"]
+    DATE_LO, DATE_HI = cfg["dates"]["feature_select_dates"].get("date_lo", 1300), cfg["dates"]["feature_select_dates"].get("date_hi", 1500)
 
     mm_root = P("local", cfg["paths"]["sample_mm"])         # 本地 memmap 根目录
     ensure_dir_local(mm_root)

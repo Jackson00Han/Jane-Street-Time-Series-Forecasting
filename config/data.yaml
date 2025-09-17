@@ -37,15 +37,15 @@ paths:
   mm:           "mm"                    # 全量内存映射 （本地）
   mm_shards:    "mm_shards"             # 分片内存映射（本地）
   sample_mm:    "sample_mm"             # 采样内存映射（本地）
-  panel_mm:     "panel_mm"              # 面板内存映射（本地）
+  train_mm:     "train_mm"              # 面板内存映射（本地）
 
   models:       "models"
   reports:      "reports"
   cache:        "cache"
   tmp:          "tmp"
 
-  feature_list_path: "/mnt/data/js/exp/v1/models/feature_set/fs__1020-1100__cv2-g3-r9__seed42__top632__1758034774.txt"            # 特征列表路径
-
+  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1300-1500__cv2-g7-r9__seed42__top632__1758109642.txt"            # 特征列表路径
+  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1300-1500__cv2-g7-r9__seed42__top632__1758109642"
 # 关键列与目标
 keys: ["symbol_id", "date_id", "time_id"]
 target: "responder_6"
@@ -56,23 +56,32 @@ sorts:
 time_bucket: "time_bucket"           # 生成的时间桶列名（与 bucket_size 相关）
 
 
-schema:                                  # 仅用于启动时的快速校验
-  keys:
-    symbol_id: int32
-    date_id: int32
-    time_id: int32
-  target: float32
-  weight: float32
-
 # --------- 数据时间范围与切分 ---------
 dates:
   date_lo: 750 # 原始数据起点日期
   date_hi: 1500 # 原始数据终点日期（含）
-  train_lo: 800
-  train_hi: 1500
+
   feature_select_dates:
     date_lo: 1300
     date_hi: 1500
+
+  train_lo: 800
+  train_hi: 1500
+
+  tune_dates:
+    date_lo: 1300
+    date_hi: 1500
+
+  final_train_dates:
+    date_lo: 800
+    date_hi: 1500
+
+
+cv:
+  n_splits: 3
+  gap_days: 7
+  train_to_val: 9
+
 
 
 # --------- 交易时序参数（影响填充/窗口等） ---------
@@ -148,11 +157,6 @@ feature_eng:
   fe_pad_days: 30
   fe_core_days: 30
 
-cv:
-  n_splits: 2
-  gap_days: 3
-  train_to_val: 9
-
 
 lgb_select:
   device_type: gpu        # 或 cpu
@@ -168,19 +172,28 @@ lgb_select:
   log_period: 100
   select_top_k: 600       # 导出前K特征
 
-lgb_train:
+lgb+tune:
   device_type: gpu        # 或 cpu
-  learning_rate: 0.05
-  num_leaves: 63
-  max_depth: 8
-  feature_fraction: 0.80
-  bagging_fraction: 0.80
-  bagging_freq: 1
-  min_data_in_leaf: 200
   num_boost_round: 4000
   early_stopping_rounds: 100
   log_period: 100
-  final_boost_margin: 1.10
+
+  n_trials: 30
+
+
+lgb_best:
+  num_leaves: 111, 
+  max_depth: 12, 
+  min_data_in_leaf: 1000, 
+  learning_rate: 0.05394633936788147, 
+  feature_fraction: 0.7390046601106091, 
+  bagging_fraction: 0.7389986300840506, 
+  bagging_freq: 1, 
+  lambda_l2: 17.323522915498703, 
+  lambda_l1: 3.005575058716044, 
+  min_gain_to_split: 0.07080725777960455
+
+
 
 # --------- 列级白名单（强约束，防止隐形泄露） ---------
 white_list: ["time_pos", "time_sin", "time_cos", "time_bucket"]
