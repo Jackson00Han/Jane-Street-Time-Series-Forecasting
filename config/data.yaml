@@ -182,15 +182,20 @@ lgb+tune:
 
 
 lgb_best:
-  num_leaves: 111, 
-  max_depth: 12, 
-  min_data_in_leaf: 1000, 
-  learning_rate: 0.05394633936788147, 
-  feature_fraction: 0.7390046601106091, 
-  bagging_fraction: 0.7389986300840506, 
-  bagging_freq: 1, 
-  lambda_l2: 17.323522915498703, 
-  lambda_l1: 3.005575058716044, 
+  device_type: gpu
+  num_boost_round: 4000
+  early_stopping_rounds: 100
+  log_period: 100
+  final_boost_margin: 1.1
+  num_leaves: 111
+  max_depth: 12
+  min_data_in_leaf: 1000
+  learning_rate: 0.05394633936788147
+  feature_fraction: 0.7390046601106091
+  bagging_fraction: 0.7389986300840506
+  bagging_freq: 1
+  lambda_l2: 17.323522915498703
+  lambda_l1: 3.005575058716044
   min_gain_to_split: 0.07080725777960455
 
 
