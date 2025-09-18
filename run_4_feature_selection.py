@@ -90,14 +90,6 @@ def main():
     assert np.all(np.diff(d_sub) >= 0), "子集 d 非单调；请检查 memmap"
     print(f"[{_now()}][fs] Subset ok: rows={subset_idx.size:,}, unique_days={np.unique(d_sub).size}, d_sub=[{int(d_sub.min())},{int(d_sub.max())}]")
 
-    # 权重分布快速打印（可判断 wr2 分母是否过小）
-    try:
-        w_sub = w[subset_idx].astype(np.float64, copy=False)
-        w_zero = float((w_sub==0).mean())
-        print(f"[{_now()}][fs] weight stats -> min={w_sub.min():.3g}, median={np.median(w_sub):.3g}, max={w_sub.max():.3g}, zero%={w_zero:.2%}")
-    except Exception:
-        pass
-
     # =========================
     # 3) 构建 CV
     # =========================

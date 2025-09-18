@@ -130,7 +130,7 @@ def fe_resp_same_tick_xday(
     keys: Tuple[str,str,str] = ("symbol_id","date_id","time_id"),
     rep_cols: Sequence[str],
     is_sorted: bool = False,
-    prev_soft_days: Optional[int] = None,   # None=严格d-k；整数=TTL
+    prev_soft_days: Optional[int] = None,   # None=严格d-k；整数=TTL 这个设置有问题！！！必须用None ！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
     cast_f32: bool = True,
     ndays: int = 5,
     stats_rep_cols: Optional[Sequence[str]] = None,
@@ -160,7 +160,7 @@ def fe_resp_same_tick_xday(
             for k in range(1, ndays + 1):
                 val_k  = pl.col(r).shift(k).over([g_symbol, g_time])
                 day_k  = pl.col(g_date).shift(k).over([g_symbol, g_time])
-                gap_k  = (pl.col(g_date) - day_k).cast(pl.Int32)
+                gap_k  = (pl.col(g_date) - day_k).cast(pl.Int32) #!!! 这里应该 g_date - day_k - k 吧？？！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
 
                 if prev_soft_days is None:
                     # 严格 d-k：gap==k

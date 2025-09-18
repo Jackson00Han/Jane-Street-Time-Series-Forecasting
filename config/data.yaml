@@ -42,8 +42,8 @@ paths:
   cache:        "cache"
   tmp:          "tmp"
 
-  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1020-1200__cv2-g7-r9__seed42__top800__1758213637.txt"            # 特征列表路径
-  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1020-1200__cv2-g7-r9__seed42__top800__1758213637"
+  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1400-1698__cv2-g7-r9__seed42__top800__1758227935.txt"            # 特征列表路径
+  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1400-1698__cv2-g7-r9__seed42__top800__1758227935"
 
 # 关键列与目标
 keys: ["symbol_id", "date_id", "time_id"]
@@ -125,10 +125,10 @@ feature_eng:
     prev_soft_days: 7
     cast_f32: true
     # 适度的尾部滞后
-    tail_lags: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 967]
-    tail_diffs: [1, 4, 16, 64]
+    tail_lags: [1,]
+    tail_diffs: [1, ]
     # 日度滚动：短中长三档
-    rolling_windows: [3, 5, 7, 14]
+    rolling_windows: [3,]
 
   B:
     enabled: true
@@ -147,15 +147,15 @@ feature_eng:
     cast_f32: true
     batch_size: 10
     # 适度的历史派生
-    lags: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 967]
-    ret_periods: [1, 4, 8, 16]
-    diff_periods: [1, 2, 4, 8, 16]
-    rz_windows: [3, 5, 7, 14]
-    ewm_spans: [5, 10, 30, 60]
+    lags: [1, ]
+    ret_periods: [1, ]
+    diff_periods: [1, ]
+    rz_windows: [3, ]
+    ewm_spans: [5, ]
     keep_rmean_rstd: true
     cs_cols: []              # 若后续要做截面rank，再指定列名
 
-  fe_pad_days: 15
+  fe_pad_days: 60
   fe_core_days: 30
 
 
@@ -171,7 +171,7 @@ lgb_select:
   num_boost_round: 4000
   early_stopping_rounds: 100
   log_period: 100 
-  select_top_k: 600       # 导出前K特征
+  select_top_k: 200       # 导出前K特征
 
 lgb+tune:
   device_type: gpu        # 或 cpu
