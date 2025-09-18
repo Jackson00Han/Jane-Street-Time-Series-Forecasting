@@ -94,54 +94,64 @@ def main():
     # ===============================
     # 6) 合并响应变量（右表：权重+响应+time_bucket）
     # ===============================
+
+    # 右表：
     rhs = (
-        lb.select([*KEYS, WEIGHT, "time_bucket", *RESP_COLS])
-        .with_columns([pl.col(k).cast(pl.Int32) for k in KEYS])
+        lb.select([*KEYS, WEIGHT, 'time_bucket', *RESP_COLS])
+        .with_columns([pl.col(k).cast(pl.Int32) for k in KEYS]).sort(TIME_SORT)
     )
-    # 左表：已填补（从本地缓存读）
+    print("Right table schema:", rhs.collect_schema())
+    print("row count:", rhs.select(pl.count()).collect())
+
+    # 左表
+    imp_path = Path(P("local", cfg["paths"]["cache"])) / "sample_imputed.parquet"
     lf_imp = pl.scan_parquet(str(imp_path)).with_columns([pl.col(k).cast(pl.Int32) for k in KEYS])
+    lf_imp = lf_imp.sort(TIME_SORT)
 
-    # 日期范围
+    print("Left table schema:", lf_imp.collect_schema())
+    print("row count:", lf_imp.select(pl.count()).collect())
+
+
     dmin, dmax = (
-        lf_imp.select(pl.col("date_id").min().alias("dmin"), pl.col("date_id").max().alias("dmax"))
-            .collect()
-            .row(0)
+        lf_imp.select(
+            pl.col('date_id').min().alias('dmin'),
+            pl.col('date_id').max().alias('dmax')
+            )
+        .collect()
+        .row(0)
     )
+    print(f"Date range: {dmin} to {dmax}, total {dmax - dmin + 1} days")
 
-    # 输出根目录（Azure）
-    out_root = P("az", cfg["paths"]["clean_shards"])
-    ensure_dir_az(out_root)
-    print(f"Processing date range: {dmin}..{dmax}, batch_size={batch_size}")
-
+    path = P('az', cfg['paths']['clean_shards'])
+    fs.makedirs(path, exist_ok=True)
+    print(f"Processing date range: {dmin} to {dmax}")
+    
     # ===============================
     # 7) 按日批输出（进度条）
     # ===============================
+
     total_batches = (dmax - dmin + 1 + batch_size - 1) // batch_size
-
     for lo in tqdm(range(dmin, dmax + 1, batch_size), total=total_batches, desc="clean shards"):
-        hi = min(lo + batch_size, dmax + 1)  # hi 为左开
+        hi = min(lo + batch_size, dmax + 1)
 
-        left  = lf_imp.filter(pl.col("date_id").is_between(lo, hi, closed="left"))
-        right = (
-            rhs.filter(pl.col("date_id").is_between(lo, hi, closed="left"))
-            .sort(TIME_SORT)
-            .unique(subset=KEYS, keep="last")
+        left = (
+            lf_imp
+            .filter(pl.col('date_id').is_between(lo, hi, closed='left'))
         )
+        
+        right = rhs.filter(pl.col('date_id').is_between(lo, hi, closed='left'))
 
-        part = left.join(right, on=KEYS, how="left").sort(TIME_SORT)
+        part = (left.join(right, on=TIME_SORT, how='left')).sort(TIME_SORT)
 
-        # 选出“非 key/resp/weight/time_bucket”的特征列
-        exclude = set([*KEYS, WEIGHT, "time_bucket", *RESP_COLS])
-        feature_cols = [c for c in part.collect_schema().names() if c not in exclude]
-        part = part.select([*KEYS, WEIGHT, "time_bucket", *feature_cols, *RESP_COLS])
-
-        # 命名时 hi 为排他，因此文件名用 hi-1
+        # 命名时注意 hi 是排他的，所以文件名用 hi-1
         out_lo, out_hi = lo, hi - 1
-        part.sink_parquet(
-            f"{out_root}/clean_{out_lo:04d}_{out_hi:04d}.parquet",
-            compression="zstd",
-            statistics=True,
-            storage_options=storage_options,
+        (
+            part.sink_parquet(
+                f"{path}/clean_{out_lo:04d}_{out_hi:04d}.parquet",
+                compression="zstd",
+                statistics=True,                 # 写入页/列统计划出更快
+                storage_options=storage_options,
+            )
         )
 
 if __name__ == "__main__":

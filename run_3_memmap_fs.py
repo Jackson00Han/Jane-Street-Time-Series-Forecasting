@@ -27,8 +27,8 @@ def shard_key(path: str):
 def main():
     # 0) 配置 & 路径
     date_cfg = cfg["dates"]["feature_select_dates"]
-    DATE_LO = to_int(date_cfg.get("date_lo", 1300), "date_lo")
-    DATE_HI = to_int(date_cfg.get("date_hi", 1500), "date_hi")
+    DATE_LO = to_int(date_cfg.get("date_lo", 1100), "date_lo")
+    DATE_HI = to_int(date_cfg.get("date_hi", 1200), "date_hi")
     if DATE_LO > DATE_HI:
         raise ValueError(f"date_lo({DATE_LO}) > date_hi({DATE_HI})，请检查配置")
 

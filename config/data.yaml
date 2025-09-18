@@ -42,8 +42,8 @@ paths:
   cache:        "cache"
   tmp:          "tmp"
 
-  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1400-1698__cv2-g7-r9__seed42__top800__1758143244.txt"            # 特征列表路径
-  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1400-1698__cv2-g7-r9__seed42__top800__1758143244"
+  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1020-1200__cv2-g7-r9__seed42__top800__1758213637.txt"            # 特征列表路径
+  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1020-1200__cv2-g7-r9__seed42__top800__1758213637"
 
 # 关键列与目标
 keys: ["symbol_id", "date_id", "time_id"]
@@ -56,24 +56,27 @@ time_bucket: "time_bucket"           # 生成的时间桶列名（与 bucket_siz
 
 # --------- 数据时间范围与切分 ---------
 dates:
-  date_lo: 750 # 原始数据起点日期
+  date_lo: 800 # 原始数据起点日期
   date_hi: 1698 # 原始数据终点日期（含）
 
   train_lo: 800
   train_hi: 1698
 
   feature_select_dates:
-    date_lo: 1000
-    date_hi: 1200
-
-  tune_dates:
-    date_lo: 1000
-    date_hi: 1200
-
-  final_train_dates:
-    date_lo: 800
+    date_lo: 1400
     date_hi: 1698
 
+  tune_dates:
+    date_lo: 1400
+    date_hi: 1600
+
+  final_train_dates_1:
+    date_lo: 1000
+    date_hi: 1698
+
+  final_train_dates_1:
+    date_lo: 800
+    date_hi: 1698
 
 cv:
   n_splits: 2
@@ -152,7 +155,7 @@ feature_eng:
     keep_rmean_rstd: true
     cs_cols: []              # 若后续要做截面rank，再指定列名
 
-  fe_pad_days: 30
+  fe_pad_days: 15
   fe_core_days: 30
 
 
