@@ -108,8 +108,8 @@ def main():
     # =========================
     seed_val = int(cfg["seed"])
     ds_params = dict(
-        max_bin=63,
-        bin_construct_sample_cnt=200000,
+        max_bin=127,
+        bin_construct_sample_cnt=400000,
         min_data_in_bin=3,
         data_random_seed=seed_val,
     )
@@ -138,16 +138,16 @@ def main():
         )
         # 搜索空间（温和、收敛快）
         p.update(
-            num_leaves=trial.suggest_int("num_leaves", 31, 255, step=16),
-            max_depth=trial.suggest_int("max_depth", 6, 12),
+            num_leaves=trial.suggest_int("num_leaves", 31, 127, step=16),
+            max_depth=trial.suggest_int("max_depth", 6, 10),
             min_data_in_leaf=trial.suggest_int("min_data_in_leaf", 200, 1200, step=100),
-            learning_rate=trial.suggest_float("learning_rate", 0.03, 0.07),
-            feature_fraction=trial.suggest_float("feature_fraction", 0.70, 0.95),
-            bagging_fraction=trial.suggest_float("bagging_fraction", 0.70, 0.95),
-            bagging_freq=trial.suggest_int("bagging_freq", 1, 5),
-            lambda_l2=trial.suggest_float("lambda_l2", 0.0, 20.0),
-            lambda_l1=trial.suggest_float("lambda_l1", 0.0, 5.0),
-            min_gain_to_split=trial.suggest_float("min_gain_to_split", 0.0, 0.1),
+            learning_rate=trial.suggest_float("learning_rate", 0.001, 0.05),
+            feature_fraction=trial.suggest_float("feature_fraction", 0.70, 0.90),
+            bagging_fraction=trial.suggest_float("bagging_fraction", 0.70, 0.90),
+            bagging_freq=trial.suggest_int("bagging_freq", 1, 3),
+            lambda_l2=trial.suggest_float("lambda_l2", 0.0, 1.0),
+            lambda_l1=trial.suggest_float("lambda_l1", 0.0, 1.0),
+            min_gain_to_split=trial.suggest_float("min_gain_to_split", 0.0, 0.02),
         )
         return p
 

@@ -34,9 +34,7 @@ paths:
   sample_fe:    "sample_fe"             # 采样后的特征（可选）
   panel_shards: "panel_shards"          # 面板化分片
 
-  mm:           "mm"                    # 全量内存映射 （本地）
-  mm_shards:    "mm_shards"             # 分片内存映射（本地）
-  sample_mm:    "sample_mm"             # 采样内存映射（本地）
+  fs_mm:    "fs_mm"             # 采样内存映射（本地）
   train_mm:     "train_mm"              # 面板内存映射（本地）
 
   models:       "models"
@@ -44,41 +42,41 @@ paths:
   cache:        "cache"
   tmp:          "tmp"
 
-  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1300-1500__cv2-g7-r9__seed42__top632__1758109642.txt"            # 特征列表路径
-  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1300-1500__cv2-g7-r9__seed42__top632__1758109642"
+  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1400-1698__cv2-g7-r9__seed42__top800__1758143244.txt"            # 特征列表路径
+  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1400-1698__cv2-g7-r9__seed42__top800__1758143244"
+
 # 关键列与目标
 keys: ["symbol_id", "date_id", "time_id"]
 target: "responder_6"
 weight: "weight"
 sorts:
   time_major: ["date_id", "time_id", "symbol_id"]
-
 time_bucket: "time_bucket"           # 生成的时间桶列名（与 bucket_size 相关）
 
 
 # --------- 数据时间范围与切分 ---------
 dates:
   date_lo: 750 # 原始数据起点日期
-  date_hi: 1500 # 原始数据终点日期（含）
-
-  feature_select_dates:
-    date_lo: 1300
-    date_hi: 1500
+  date_hi: 1698 # 原始数据终点日期（含）
 
   train_lo: 800
-  train_hi: 1500
+  train_hi: 1698
+
+  feature_select_dates:
+    date_lo: 1000
+    date_hi: 1200
 
   tune_dates:
-    date_lo: 1300
-    date_hi: 1500
+    date_lo: 1000
+    date_hi: 1200
 
   final_train_dates:
     date_lo: 800
-    date_hi: 1500
+    date_hi: 1698
 
 
 cv:
-  n_splits: 3
+  n_splits: 2
   gap_days: 7
   train_to_val: 9
 
@@ -169,7 +167,7 @@ lgb_select:
   min_data_in_leaf: 200
   num_boost_round: 4000
   early_stopping_rounds: 100
-  log_period: 100
+  log_period: 100 
   select_top_k: 600       # 导出前K特征
 
 lgb+tune:
@@ -178,7 +176,7 @@ lgb+tune:
   early_stopping_rounds: 100
   log_period: 100
 
-  n_trials: 30
+  n_trials: 40
 
 
 lgb_best:
@@ -207,7 +205,6 @@ white_list: ["time_pos", "time_sin", "time_cos", "time_bucket"]
 debug:
   check_time_monotone: true   # 开发期开；批量/生产可关
 
-  
 
 
 # --------- 报告与审计 ---------
