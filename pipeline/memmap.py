@@ -36,6 +36,7 @@ def shard2memmap(
     ofs = 0
     for p, k in zip(sorted_paths, counts):
         df = pl.scan_parquet(p, storage_options=storage_options).select(need_cols).collect(streaming=True)
+        
 
         # 转 numpy（零拷贝尽可能）
         X_block = df.select(feat_cols).to_numpy().astype(np.float32, copy=False)

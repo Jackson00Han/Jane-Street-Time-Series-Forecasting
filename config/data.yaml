@@ -42,8 +42,9 @@ paths:
   cache:        "cache"
   tmp:          "tmp"
 
-  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1400-1698__cv2-g7-r9__seed42__top800__1758227935.txt"            # 特征列表路径
-  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1400-1698__cv2-g7-r9__seed42__top800__1758227935"
+  fs_mm_prefix: "/mnt/data/js/exp/v1/fs_mm/full_sample_v1"
+  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1400-1600__cv2-g7-r9__seed42__top800__1758315856.txt"            # 特征列表路径
+  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1400-1600__cv2-g7-r9__seed42__top800__1758315856__range1400-1698"
 
 # 关键列与目标
 keys: ["symbol_id", "date_id", "time_id"]
@@ -63,15 +64,18 @@ dates:
   train_hi: 1698
 
   feature_select_dates:
-    date_lo: 1400
-    date_hi: 1698
+    date_lo: 1200
+    date_hi: 1350
 
+  full_train:
+    date_lo: 1200
+    date_hi: 1500
   tune_dates:
-    date_lo: 1400
-    date_hi: 1600
+    date_lo: 1200
+    date_hi: 1500
 
   final_train_dates_1:
-    date_lo: 1000
+    date_lo: 1400
     date_hi: 1698
 
   final_train_dates_1:
@@ -171,7 +175,7 @@ lgb_select:
   num_boost_round: 4000
   early_stopping_rounds: 100
   log_period: 100 
-  select_top_k: 200       # 导出前K特征
+  select_top_k: 1000       # 导出前K特征
 
 lgb+tune:
   device_type: gpu        # 或 cpu

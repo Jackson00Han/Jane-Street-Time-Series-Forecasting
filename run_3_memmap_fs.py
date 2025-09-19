@@ -27,8 +27,8 @@ def shard_key(path: str):
 def main():
     # 0) 配置 & 路径
     date_cfg = cfg["dates"]["feature_select_dates"]
-    DATE_LO = to_int(date_cfg.get("date_lo", 1100), "date_lo")
-    DATE_HI = to_int(date_cfg.get("date_hi", 1200), "date_hi")
+    DATE_LO = to_int(date_cfg.get("date_lo", 1400), "date_lo")
+    DATE_HI = to_int(date_cfg.get("date_hi", 1600), "date_hi")
     if DATE_LO > DATE_HI:
         raise ValueError(f"date_lo({DATE_LO}) > date_hi({DATE_HI})，请检查配置")
 
@@ -63,9 +63,11 @@ def main():
     print(f"[memmap] first shard = {os.path.basename(panel_paths[0])}, last shard = {os.path.basename(panel_paths[-1])}")
 
     # 2) 抽样读取 schema（确保列集一致）
-    sample_path = panel_paths[0]
+    sample_path = panel_paths[0] #这个选择不好， 但先这样
+    print(f"sample_path: {sample_path}")
     schema = pl.scan_parquet(sample_path, storage_options=storage_options).collect_schema()
     names = schema.names()
+    print(f"feat number: {len(names)}")
     keys   = tuple(cfg["keys"])      # e.g. ('symbol_id','date_id','time_id')
     target = cfg["target"]           # e.g. 'responder_6'
     weight = cfg["weight"]           # e.g. 'weight'

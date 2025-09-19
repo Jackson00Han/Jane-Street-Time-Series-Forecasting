@@ -14,7 +14,7 @@ def _tag_from_features_path(p: str) -> str:
 
 def main():
     # ============ 0) 配置与路径 ============
-    DATE_LO, DATE_HI = int(cfg["dates"]["train_lo"]), int(cfg["dates"]["train_hi"])
+    DATE_LO, DATE_HI = int(cfg["dates"]["full_train"]["date_lo"]), int(cfg["dates"]["full_train"]["date_hi"])
     mm_root = P("local", cfg["paths"]["train_mm"]); ensure_dir_local(mm_root)
 
     panel_root = azify(P("az", cfg["paths"]["panel_shards"]))
@@ -22,7 +22,7 @@ def main():
     feat_list_path = cfg["paths"]["feature_list_path"]
     tag = _tag_from_features_path(feat_list_path)
 
-    print(f"[cfg] train range: [{DATE_LO}, {DATE_HI}]")
+    print(f"[cfg] full train range: [{DATE_LO}, {DATE_HI}]")
     print(f"[cfg] panel_root: {panel_root}")
     print(f"[cfg] feature list: {feat_list_path} (tag={tag})")
     print(f"[io ] mm_root: {mm_root}")
@@ -85,7 +85,7 @@ def main():
     print(f"[plan] rows={n_rows:,}, feats={n_feat} -> estimated disk ~{est_gb:.1f} GB (counted in {time.time()-t_count:.1f}s)")
 
     # ============ 3) 写 memmap ============
-    prefix = os.path.join(mm_root, f"full_train__{tag}")  # 用 tag 防止覆盖旧数据
+    prefix = os.path.join(mm_root, f"full_train__{tag}__range{DATE_LO}-{DATE_HI}")
     print(f"[write] start -> prefix: {prefix}")
     t0 = time.time()
 

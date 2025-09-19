@@ -57,7 +57,7 @@ def main():
     # 0) 路径
     # =========================
     mm_root   = P("local", cfg["paths"]["fs_mm"])
-    prefix    = os.path.join(mm_root, "full_sample_v1")     # 与 run_memmap.py 保持一致
+    prefix    = cfg["paths"]["fs_mm_prefix"]    # 与 run_memmap.py 保持一致
     rep_dir   = os.path.join(P("local", cfg["paths"]["reports"]), "fi")
     featset_dir = os.path.join(P("local", cfg.get("paths", {}).get("models", "exp/v1/models")), "feature_set")
     ensure_dir_local(rep_dir); ensure_dir_local(featset_dir)
@@ -117,7 +117,7 @@ def main():
     # 4) LightGBM 参数
     # =========================
     ds_params = dict(
-        max_bin=63,
+        max_bin=31,
         bin_construct_sample_cnt=200000,
         min_data_in_bin=3,
         data_random_seed=int(cfg['seed']),
@@ -210,7 +210,7 @@ def main():
 
     whitelist = list(cfg.get("white_list", []))
     fi_normal = fi[~fi["feature"].isin(whitelist)].reset_index(drop=True)
-    top_k = int(cfg["lgb_select"].get("top_k", 800))
+    top_k = int(cfg["lgb_select"].get("select_top_k", 800))
     final_feats = list(dict.fromkeys(whitelist + fi_normal["feature"].head(top_k).tolist()))
     print(f"[{_now()}][fi] selected={len(final_feats)} (whitelist {len(whitelist)}), "
           f"top mean_gain_share={fi['mean_gain_share'].iloc[:5].round(6).tolist()} "
