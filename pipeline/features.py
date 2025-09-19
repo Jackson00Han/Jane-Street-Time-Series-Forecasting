@@ -11,6 +11,50 @@ from pipeline.validate import assert_time_monotone
 # 特征工程
 
 # A：响应列的“上一日尾部/日度摘要”
+# fe_resp_daily 产出列命名与示例（对每个 rep 列分别生成同名模式）
+#
+# 设：
+#   rep_cols = ["responder_0", "responder_6"]
+#   tail_lags = [1, 2, 10]
+#   tail_diffs = [1, 5]
+#   rolling_windows = [3, 7]
+#
+# 聚合当日(日频)得到的“当日相对”列（先在 (symbol,date) 上聚合，再历史化）：
+#   {r}_prev_tail_lag{L}              # 当日按 time 排序后倒数第 L 个值（L∈tail_lags ∪ {1, K+1}）
+#   {r}_prevday_close                 # 当日收尾（= prev_tail_lag1）
+#   {r}_prevday_mean                  # 当日均值
+#   {r}_prevday_std                   # 当日标准差（ddof=1）
+#   {r}_prev_tail_d{K}                # 当日尾部差分：lag1 - lag(K+1)，K∈tail_diffs
+#   {r}_prev2day_close                # 前一日的收尾（= prevday_close.shift(1) over symbol）
+#   {r}_overnight_gap                 # 当日收尾 - 前一日收尾
+#   {r}_prevday_close_minus_mean      # 当日收尾 - 当日均值
+#   {r}_close_roll{W}_mean            # 基于当日收尾的日度滚动均值，W∈rolling_windows
+#   {r}_close_roll{W}_std             # 基于当日收尾的日度滚动标准差（ddof=1）
+#
+# 然后将上述“当日相对”的列统一转换为“对 d 生效的历史值”（TTL）：
+#   - 若 prev_soft_days is None：总取“最近一次历史非空”的值
+#   - 否则：仅当 (d - 最近一次非空日) ≤ prev_soft_days 才取，否则为 null
+#   - 注意：转换后列名不变，但语义已是“历史值广播到 d 的所有 tick”
+#
+# 具体示例（r="responder_0"）在上述参数下，会出现：
+#   responder_0_prev_tail_lag1
+#   responder_0_prev_tail_lag2
+#   responder_0_prev_tail_lag10
+#   responder_0_prevday_close
+#   responder_0_prevday_mean
+#   responder_0_prevday_std
+#   responder_0_prev_tail_d1
+#   responder_0_prev_tail_d5
+#   responder_0_prev2day_close
+#   responder_0_overnight_gap
+#   responder_0_prevday_close_minus_mean
+#   responder_0_close_roll3_mean
+#   responder_0_close_roll3_std
+#   responder_0_close_roll7_mean
+#   responder_0_close_roll7_std
+#
+# 同样的列会对 "responder_6" 生成一遍。
+
 def fe_resp_daily(
     lf: pl.LazyFrame,
     *,
@@ -124,6 +168,49 @@ def fe_resp_daily(
 
 
 # B：同 time_id 跨日的 prev{k} + 统计
+
+# fe_resp_same_tick_xday 产出列命名与示例（针对每个 responder r ∈ rep_cols）
+#
+# 语义：
+#   按 (symbol_id, time_id) 分组，沿 date 方向做跨日滞后与统计。
+#   - prev_soft_days is None  -> 严格 d-k：只有当 gap==k 才取值（不跨周末替代）。
+#   - prev_soft_days = D(int) -> TTL：允许 gap ∈ (0..D) 的历史值通过（不是“k..k+t”搜最近）。
+#
+# 主要输出：
+#   {r}_same_t_prev{k}              # 同一 time_id 的严格/TTL 跨日滞后 (k=1..ndays)
+#   {r}_same_t_last{N}_mean         # 最近 N 天(按同一 time_id)的均值（忽略 null）
+#   {r}_same_t_last{N}_std          # 最近 N 天标准差（ddof=1，忽略 null）
+#   {r}_same_t_last{N}_slope        # 最近 N 天标准化后按“最近为正、久远为负”加权的趋势
+#   prev1_same_t_mean_{M}rep        # （可选）跨 responder 的 prev1 行内均值（M=len(rep_cols)）
+#   prev1_same_t_std_{M}rep         # （可选）跨 responder 的 prev1 行内标准差
+#
+# slope 说明：
+#   - 对列 {r}_same_t_prev1..prevN 先做行内标准化（减去 mean / 除以 std），
+#   - 然后用 x = [N, N-1, ..., 1] 线性权重（标准化到零均值单位方差），
+#   - 缺失值按 0 处理，分母使用有效样本数 n_eff 做归一，得到稳定趋势分数。
+#
+# 示例：
+#   参数：rep_cols=["responder_0","responder_6"], ndays=5, prev_soft_days=None（严格 d-k）
+#   生成（以 r="responder_0" 为例）：
+#     responder_0_same_t_prev1
+#     responder_0_same_t_prev2
+#     responder_0_same_t_prev3
+#     responder_0_same_t_prev4
+#     responder_0_same_t_prev5
+#     responder_0_same_t_last5_mean
+#     responder_0_same_t_last5_std
+#     responder_0_same_t_last5_slope
+#   若 add_prev1_multirep=True 且 M=len(rep_cols)=2，还会有：
+#     prev1_same_t_mean_2rep
+#     prev1_same_t_std_2rep
+#
+# 注意：
+#   1) 函数内部会确保排序为 (symbol_id, time_id, date_id)，使 shift(k).over([symbol,time]) 因果正确。
+#   2) 当 prev_soft_days=None 时，prev{k} 与 “严格 d-k” 一致；若设为整数 D，则只做“新鲜度上限”过滤，
+#      并不会在 k..k+t 区间“向右找替代”；要该语义需专门实现。
+#   3) lastN_* 统计会忽略 null，且对全 null 的情况做了分母保护（不会产生 NaN）。
+
+
 def fe_resp_same_tick_xday(
     lf: pl.LazyFrame,
     *,
@@ -238,6 +325,72 @@ def fe_resp_same_tick_xday(
 
 
 # C 系列：
+
+# fe_feat_history（Stage C）生成列：命名、语义与示例
+#
+# 粒度与排序
+#   - 以 by_grp = [symbol_id] 做分组，按 (symbol_id, date_id, time_id) 的时间顺序计算；
+#   - 因此 C 系列的 lag/ret/diff 都是 **tick 级滞后（按行数）**，不是“天”。(L=967 大致≈ 1 天的 ticks)
+#
+# prev_soft_days 的作用（C 中）
+#   - 对于 __lagL / __retK / __diffK / r-z / ewm 都会在“取到的上一条（或第 L 条）”上附加一个
+#     “新鲜度上限”掩码：gap = (当前 date_id - 该历史值的 date_id)
+#     * prev_soft_days is None  -> 不限制新鲜度（只要能取到第 L 条历史就保留）【常用于 tick 级 lag】
+#     * prev_soft_days = D(int) -> 仅当 0 < gap ≤ D 才保留，否则置 null（用于希望只接受“最近 D 天内”的 tick 历史）
+#
+# 产出类别与命名
+# 1) Tick 级滞后（可选）
+#    {c}__lag{L}
+#    - 第 L 条历史 tick 的取值；若设置 prev_soft_days=D，会额外要求该历史 tick 的日期新鲜度 gap ≤ D。
+#
+# 2) “收益率”式派生（可选）
+#    {c}__ret{K}
+#    - 定义为 cur/prev - 1，其中 prev 为第 K 条历史（若 K ∈ lags 列表则复用 {c}__lagK 的结果，已含掩码）。
+#    - 若 prev 为 0 或 null，结果为 null。
+#
+# 3) 差分（可选）
+#    {c}__diff{K} = cur - prevK
+#    - prevK 取法与 ret 相同（若 K 在 lags 中则直接复用 {c}__lagK）。
+#
+# 4) Rolling r-z（可选）
+#    {c}__rmean{W}, {c}__rstd{W}, {c}__rz{W}
+#    - 以 t-1 的基准（等价于 lag1）为序列，做窗口为 W 的滚动 mean/std，并计算 r-z = (base - mean) / (std+eps)。
+#    - keep_rmean_rstd=False 时仅输出 {c}__rz{W}。
+#
+# 5) EWM（可选）
+#    {c}__ewm{S}
+#    - 以 t-1 的基准序列做指数加权均值（span=S, adjust=False, ignore_nulls=True）。
+#
+# 6) 截面统计（可选，cs_cols 非空时）
+#    {c}__cs_z, {c}__csrank
+#    - 对同一 (date_id, time_id) 截面，基于该列的 t-1 值做截面 z-score 与百分位 rank∈[0,1]（n=1 -> 0.5）。
+#
+# 重要实现细节
+#   - 若已在 C1 产出 {c}__lag1，则 r-z 与 ewm 会优先使用它作为 t-1 基准；否则内部自行构造 shift(1)。
+#   - r-z / ewm 的“t-1 基准”也受 prev_soft_days 的新鲜度掩码影响（若设置了 D）。
+#   - 所有 rolling/std 统一 ddof=1；数值稳定性使用 eps 防 0 除。
+#
+# 参数建议（常见）
+#   lags:        [1,2,3,5,7,10,14,20,28,40,50,60,80,100]    # tick 级，覆盖短中期
+#   ret_periods: [1,5,10,20,50]                             # 与 lags 对齐的若干档
+#   diff_periods:[1,5,10,20,50]
+#   rz_windows:  [5,10,20,60]
+#   ewm_spans:   [5,10,20,60]
+#   prev_soft_days: None  # tick 级 lag 通常不做“天级新鲜度”限制；若要限制，设一个合理天数如 3/5/10
+#
+# 示例（feature_cols 中含 ["feature_00","feature_07"]，选择部分档位）：
+#   feature_00__lag1,  feature_00__lag7,  feature_00__lag50
+#   feature_00__ret1,  feature_00__ret10, feature_00__diff5
+#   feature_00__rmean10, feature_00__rstd10, feature_00__rz10
+#   feature_00__ewm20
+#   feature_07__lag1, feature_07__diff1, feature_07__rz60, feature_07__ewm5
+#   （若 cs_cols 指定了 feature_00）→ feature_00__cs_z, feature_00__csrank
+#
+# 额外提示
+#   - fe_pad_days 应至少覆盖你在 C 中“最长需要的天级新鲜度”与“用于 r-z/ewm 的有效历史”，
+#     但由于 C 的 lag 是 tick 级，通常几十天的 pad 已很充裕。
+#   - 大量滞后档位会迅速膨胀列数，建议先多给，再用特征筛选（FI、非空率、方差）做裁剪。
+
 
 def fe_feat_history(
     *,
