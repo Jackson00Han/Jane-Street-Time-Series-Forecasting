@@ -43,8 +43,8 @@ paths:
   tmp:          "tmp"
 
   fs_mm_prefix: "/mnt/data/js/exp/v1/fs_mm/full_sample_v1"
-  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1400-1600__cv2-g7-r9__seed42__top800__1758315856.txt"            # 特征列表路径
-  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1400-1600__cv2-g7-r9__seed42__top800__1758315856__range1400-1698"
+  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1300-1500__cv3-g7-r9__seed42__top1000__1758383260.txt"            # 特征列表路径
+  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1300-1500__cv3-g7-r9__seed42__top1000__1758383260__range1000-1698"
 
 # 关键列与目标
 keys: ["symbol_id", "date_id", "time_id"]
@@ -60,19 +60,24 @@ dates:
   date_lo: 800 # 原始数据起点日期
   date_hi: 1698 # 原始数据终点日期（含）
 
-  train_lo: 800
-  train_hi: 1698
+  run_1_dates:
+    date_lo: 950
+    date_hi: 1698
 
-  feature_select_dates:
-    date_lo: 1200
-    date_hi: 1350
+  run_3_dates:
+    date_lo: 1300
+    date_hi: 1500
 
-  full_train:
-    date_lo: 1200
+  run_4_dates:
+    date_lo: 1300
     date_hi: 1500
-  tune_dates:
-    date_lo: 1200
-    date_hi: 1500
+
+  run_5_dates:
+    date_lo: 1000
+    date_hi: 1698
+  run_6_dates:
+    date_lo: 1000
+    date_hi: 1698
 
   final_train_dates_1:
     date_lo: 1400
@@ -83,9 +88,9 @@ dates:
     date_hi: 1698
 
 cv:
-  n_splits: 2
+  n_splits: 3
   gap_days: 7
-  train_to_val: 9
+  train_to_val: 4
 
 
 
@@ -129,20 +134,20 @@ feature_eng:
     prev_soft_days: 1
     cast_f32: true
     # 适度的尾部滞后
-    tail_lags: [1, 2, 10, 50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950, 967]
-    tail_diffs: [1, 5, 10, 30, 50, 100]
+    tail_lags: [1, 10, 50, 100, 500, 900, 950, 967]
+    tail_diffs: [1, 5, 10, 30]
     # 日度滚动：短中长三档
-    rolling_windows: [3, 7, 14, 30, 60]
+    rolling_windows: [3, 7, 14, 30]
 
   B:
     enabled: true
+    lags: [1,2,3,4,5,6,7,14,21,30]
     is_sorted: false
-    prev_soft_days: null        # TTL 软天数，和 A 保持一致
     cast_f32: true
-    ndays: 60                 # 同一 time_id 回看 5 天
     stats_rep_cols: null
     add_prev1_multirep: true
     batch_size: 5
+
 
   C:
     enabled: true
@@ -151,20 +156,20 @@ feature_eng:
     cast_f32: true
     batch_size: 10
     # 适度的历史派生
-    lags: [1, 2, 10, 50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950, 967]
-    ret_periods: [1, 5, 10, 30, 50, 100]
-    diff_periods: [1, 5, 10, 30, 50, 100]
-    rz_windows: [3, 7, 14, 30, 60]
-    ewm_spans: [5, 10, 20]
+    lags: [1, 2, 10, 50, 100, 500, 900, 950, 968, 1936, 2904, 3872, 4840, 5808, 6776, 7744]
+    ret_periods: [3, 10, 50]
+    diff_periods: [3, 10,  50]
+    rz_windows: [3, 7, 14, 30]
+    ewm_spans: [5, 10, 50]
     keep_rmean_rstd: true
     cs_cols: []              # 若后续要做截面rank，再指定列名
 
-  fe_pad_days: 60
+  fe_pad_days: 50
   fe_core_days: 30
 
 
 lgb_select:
-  device_type: gpu        # 或 cpu
+  device_type: cpu        # 或 cpu
   learning_rate: 0.05
   num_leaves: 63
   max_depth: 8
@@ -178,7 +183,7 @@ lgb_select:
   select_top_k: 1000       # 导出前K特征
 
 lgb+tune:
-  device_type: gpu        # 或 cpu
+  device_type: cpu        # 或 cpu
   num_boost_round: 4000
   early_stopping_rounds: 100
   log_period: 100

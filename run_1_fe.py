@@ -19,7 +19,7 @@ def main():
     KEYS        = tuple(cfg["keys"])
     g_sym, g_date, g_time = KEYS
     TB = cfg['time_bucket']
-
+    DATA_LO, DATA_HI = cfg["dates"]["run_1_dates"]["date_lo"], cfg["dates"]["run_1_dates"]["date_hi"]
     # ---- I/O ----
     clean_root = azify(P("az", cfg["paths"]["clean_shards"]))
     fe_root    = azify(P("az", cfg["paths"]["fe_shards"]))
@@ -28,8 +28,13 @@ def main():
     clean_paths = [azify(p) for p in sorted(fs.glob(f"{clean_root}/*.parquet"))]
     if not clean_paths:
         raise FileNotFoundError(f"No clean shards under {clean_root}")
-
+    
+    
     lc = pl.scan_parquet(clean_paths, storage_options=storage_options)
+    lc = (
+        lc.filter(pl.col(g_date).is_between(DATA_LO, DATA_HI))
+    )
+    
     days = (lc.select(pl.col("date_id").unique().sort())
               .collect(streaming=True)["date_id"].to_list())
     print(f"[FE] total unique days: {len(days)} in {clean_root}")
@@ -41,16 +46,15 @@ def main():
         tail_lags=A_cfg.get("tail_lags", [1]),
         tail_diffs=A_cfg.get("tail_diffs", [1]),
         rolling_windows=A_cfg.get("rolling_windows", [3]),
-        prev_soft_days=A_cfg.get("prev_soft_days", 7),
+        prev_soft_days=A_cfg.get("prev_soft_days", 3),
         is_sorted=A_cfg.get("is_sorted", False),
         cast_f32=A_cfg.get("cast_f32", True),
     ) if A_cfg.get("enabled", True) else None
     B = StageB(
-        ndays=B_cfg.get("ndays", 5),
+        lags=B_cfg.get("lags", [1,2,3,4,5,6,7,14,21,30]),
         stats_rep_cols=B_cfg.get("stats_rep_cols", None),
         add_prev1_multirep=B_cfg.get("add_prev1_multirep", True),
         batch_size=B_cfg.get("batch_size", 5),
-        prev_soft_days=B_cfg.get("prev_soft_days", 7),
         is_sorted=B_cfg.get("is_sorted", False),
         cast_f32=B_cfg.get("cast_f32", True),
     ) if B_cfg.get("enabled", True) else None

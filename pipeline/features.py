@@ -168,144 +168,102 @@ def fe_resp_daily(
 
 
 # B：同 time_id 跨日的 prev{k} + 统计
-
-# fe_resp_same_tick_xday 产出列命名与示例（针对每个 responder r ∈ rep_cols）
-#
-# 语义：
-#   按 (symbol_id, time_id) 分组，沿 date 方向做跨日滞后与统计。
-#   - prev_soft_days is None  -> 严格 d-k：只有当 gap==k 才取值（不跨周末替代）。
-#   - prev_soft_days = D(int) -> TTL：允许 gap ∈ (0..D) 的历史值通过（不是“k..k+t”搜最近）。
-#
-# 主要输出：
-#   {r}_same_t_prev{k}              # 同一 time_id 的严格/TTL 跨日滞后 (k=1..ndays)
-#   {r}_same_t_last{N}_mean         # 最近 N 天(按同一 time_id)的均值（忽略 null）
-#   {r}_same_t_last{N}_std          # 最近 N 天标准差（ddof=1，忽略 null）
-#   {r}_same_t_last{N}_slope        # 最近 N 天标准化后按“最近为正、久远为负”加权的趋势
-#   prev1_same_t_mean_{M}rep        # （可选）跨 responder 的 prev1 行内均值（M=len(rep_cols)）
-#   prev1_same_t_std_{M}rep         # （可选）跨 responder 的 prev1 行内标准差
-#
-# slope 说明：
-#   - 对列 {r}_same_t_prev1..prevN 先做行内标准化（减去 mean / 除以 std），
-#   - 然后用 x = [N, N-1, ..., 1] 线性权重（标准化到零均值单位方差），
-#   - 缺失值按 0 处理，分母使用有效样本数 n_eff 做归一，得到稳定趋势分数。
-#
-# 示例：
-#   参数：rep_cols=["responder_0","responder_6"], ndays=5, prev_soft_days=None（严格 d-k）
-#   生成（以 r="responder_0" 为例）：
-#     responder_0_same_t_prev1
-#     responder_0_same_t_prev2
-#     responder_0_same_t_prev3
-#     responder_0_same_t_prev4
-#     responder_0_same_t_prev5
-#     responder_0_same_t_last5_mean
-#     responder_0_same_t_last5_std
-#     responder_0_same_t_last5_slope
-#   若 add_prev1_multirep=True 且 M=len(rep_cols)=2，还会有：
-#     prev1_same_t_mean_2rep
-#     prev1_same_t_std_2rep
-#
-# 注意：
-#   1) 函数内部会确保排序为 (symbol_id, time_id, date_id)，使 shift(k).over([symbol,time]) 因果正确。
-#   2) 当 prev_soft_days=None 时，prev{k} 与 “严格 d-k” 一致；若设为整数 D，则只做“新鲜度上限”过滤，
-#      并不会在 k..k+t 区间“向右找替代”；要该语义需专门实现。
-#   3) lastN_* 统计会忽略 null，且对全 null 的情况做了分母保护（不会产生 NaN）。
-
-
 def fe_resp_same_tick_xday(
     lf: pl.LazyFrame,
     *,
-    keys: Tuple[str,str,str] = ("symbol_id","date_id","time_id"),
+    keys: Tuple[str, str, str] = ("symbol_id", "date_id", "time_id"),
     rep_cols: Sequence[str],
+    lags: Sequence[int],                      # 必填，例如 [1,2,3,4,5,6,7,14,21,30]
     is_sorted: bool = False,
-    prev_soft_days: Optional[int] = None,   # None=严格d-k；整数=TTL 这个设置有问题！！！必须用None ！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
     cast_f32: bool = True,
-    ndays: int = 5,
     stats_rep_cols: Optional[Sequence[str]] = None,
     add_prev1_multirep: bool = True,
     batch_size: int = 5,
 ) -> pl.LazyFrame:
-    
+    """
+    按 (symbol_id, time_id) 分组，沿 date 方向做离散 lags 的“严格 d-k”跨日滞后与统计：
+      - 严格：仅当 (date_now - date_shifted) == k 时保留对应的 prev{k}
+      - mean/std/slope 统计均基于给定的 lags（忽略 null）
+    """
     g_symbol, g_date, g_time = keys
-
-    # 保证 (symbol,time) 组内按 date 递增（shift(k).over([symbol,time]) 的因果顺序）
-    if not is_sorted:
-        lf = lf.sort([g_symbol, g_time, g_date]) # 注意不是date, time
+    if not lags:
+        raise ValueError("`lags` 不能为空")
+    use_lags = sorted({int(x) for x in lags if int(x) > 0})
+    if not use_lags:
+        raise ValueError("`lags` 必须包含正整数")
 
     if stats_rep_cols is None:
         stats_rep_cols = list(rep_cols)
 
+    # 1) 排序，确保因果正确：(symbol, time, date)
+    if not is_sorted:
+        lf = lf.sort([g_symbol, g_time, g_date])
+
     def _chunks(lst, k):
         for i in range(0, len(lst), k):
-            yield lst[i:i+k]
+            yield lst[i:i + k]
 
     lf_cur = lf
 
-    # 1) prev{k} with strict / TTL
+    # 2) 生成严格 prev{k}
     for batch in _chunks(list(rep_cols), batch_size):
         exprs = []
         for r in batch:
-            for k in range(1, ndays + 1):
-                val_k  = pl.col(r).shift(k).over([g_symbol, g_time])
-                day_k  = pl.col(g_date).shift(k).over([g_symbol, g_time])
-                gap_k  = (pl.col(g_date) - day_k).cast(pl.Int32) #!!! 这里应该 g_date - day_k - k 吧？？！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！！
-
-                if prev_soft_days is None:
-                    # 严格 d-k：gap==k
-                    keep = gap_k.is_not_null() & (gap_k == k)
-                else:
-                    # TTL：只要在当前日之前，且 gap<=K
-                    keep = gap_k.is_not_null() & (gap_k > 0) & (gap_k <= int(prev_soft_days))
-
-                val_k = pl.when(keep).then(val_k).otherwise(None)
+            for k in use_lags:
+                val_k = pl.col(r).shift(k).over([g_symbol, g_time])
+                day_k = pl.col(g_date).shift(k).over([g_symbol, g_time])
+                gap_k = (pl.col(g_date) - day_k).cast(pl.Int32)  # 当前日 - 滞后日
+                out = pl.when(gap_k.is_not_null() & (gap_k == k)).then(val_k).otherwise(None)
                 if cast_f32:
-                    val_k = val_k.cast(pl.Float32)
-                exprs.append(val_k.alias(f"{r}_same_t_prev{k}"))
+                    out = out.cast(pl.Float32)
+                exprs.append(out.alias(f"{r}_same_t_prev{k}"))
         lf_cur = lf_cur.with_columns(exprs)
 
-    # 2) mean/std（忽略 null）
+    # 3) mean/std（基于 use_lags）
+    L = len(use_lags)
     for batch in _chunks([r for r in stats_rep_cols if r in rep_cols], batch_size):
         exprs = []
         for r in batch:
-            cols = [f"{r}_same_t_prev{k}" for k in range(1, ndays + 1)]
+            cols = [f"{r}_same_t_prev{k}" for k in use_lags]
             vals = pl.concat_list([pl.col(c) for c in cols]).list.drop_nulls()
             m = vals.list.mean()
-            s = vals.list.std(ddof=1)   # 和全局统计一致
+            s = vals.list.std(ddof=1)
             if cast_f32:
                 m = m.cast(pl.Float32); s = s.cast(pl.Float32)
             exprs += [
-                m.alias(f"{r}_same_t_last{ndays}_mean"),
-                s.alias(f"{r}_same_t_last{ndays}_std"),
+                m.alias(f"{r}_same_t_last{L}_mean"),
+                s.alias(f"{r}_same_t_last{L}_std"),
             ]
         lf_cur = lf_cur.with_columns(exprs)
 
-    # 3) slope：时间方向设为“最近为正、久远为负”（正=近期上升）
-    x = np.arange(ndays, 0, -1, dtype=np.float64)
+    # 4) slope：最近权重最大（长度与 lags 一致）
+    x = np.arange(L, 0, -1, dtype=np.float64)
     x = (x - x.mean()) / (x.std() + 1e-9)
     x_lits = [pl.lit(float(v)) for v in x]
 
     for batch in _chunks([r for r in stats_rep_cols if r in rep_cols], batch_size):
         exprs = []
         for r in batch:
-            cols = [f"{r}_same_t_prev{k}" for k in range(1, ndays + 1)]
-            mean_ref = pl.col(f"{r}_same_t_last{ndays}_mean")
-            std_ref  = pl.col(f"{r}_same_t_last{ndays}_std")
+            cols = [f"{r}_same_t_prev{k}" for k in use_lags]
+            mean_ref = pl.col(f"{r}_same_t_last{L}_mean")
+            std_ref  = pl.col(f"{r}_same_t_last{L}_std")
             terms = [((pl.col(c) - mean_ref) / (std_ref + 1e-9)) * x_lits[i]
-                    for i, c in enumerate(cols)]
-            # ——更稳：对 null 显式置 0，避免某些版本 sum_horizontal 因 null 变 null
+                     for i, c in enumerate(cols)]
+            # null → 0，避免 sum_horizontal 传播 null
             terms = [pl.when(pl.col(c).is_not_null() & mean_ref.is_not_null() & std_ref.is_not_null())
-                    .then(t).otherwise(pl.lit(0.0)) for t, c in zip(terms, cols)]
-
+                       .then(t).otherwise(pl.lit(0.0))
+                     for t, c in zip(terms, cols)]
             n_eff = pl.sum_horizontal([pl.col(c).is_not_null().cast(pl.Int32) for c in cols]).cast(pl.Float32)
             den   = pl.when(n_eff > 0).then(n_eff).otherwise(pl.lit(1.0))
             slope = pl.sum_horizontal(terms) / den
             if cast_f32:
                 slope = slope.cast(pl.Float32)
-            exprs.append(slope.alias(f"{r}_same_t_last{ndays}_slope"))
+            exprs.append(slope.alias(f"{r}_same_t_last{L}_slope"))
         lf_cur = lf_cur.with_columns(exprs)
 
-    # 4) 跨 responder 的 prev1 行内统计（可选）
-    if add_prev1_multirep and len(rep_cols) > 0:
-        n_rep = len(rep_cols)  
+    # 5) 跨 responder 的 prev1 统计（仅当 1 在 lags 中）
+    if add_prev1_multirep and len(rep_cols) > 0 and (1 in use_lags):
+        n_rep = len(rep_cols)
         prev1_cols = [f"{r}_same_t_prev1" for r in rep_cols]
         prev1_list = pl.concat_list([pl.col(c) for c in prev1_cols]).list.drop_nulls()
         m1 = prev1_list.list.mean()
@@ -317,9 +275,10 @@ def fe_resp_same_tick_xday(
             s1.alias(f"prev1_same_t_std_{n_rep}rep"),
         ])
 
-    # 出口保持有序，便于后续 C 阶段 shift/rolling
+    # 6) 输出仍保持 (symbol, date, time) 升序
     lf_cur = lf_cur.sort([g_symbol, g_date, g_time])
     return lf_cur
+
 
 
 
@@ -643,7 +602,7 @@ class StageA:
 
 @dataclass
 class StageB:
-    ndays: int
+    lags: Sequence[int]
     stats_rep_cols: Optional[Sequence[str]] = None
     add_prev1_multirep: bool = True
     batch_size: int = 5
@@ -724,10 +683,9 @@ def run_staged_engineering(
             lf_resp,
             keys=tuple(keys),
             rep_cols=rep_cols,
+            lags=B.lags,                        # ← 只用离散 lags
             is_sorted=B.is_sorted,
-            prev_soft_days=B.prev_soft_days,
             cast_f32=B.cast_f32,
-            ndays=B.ndays,
             stats_rep_cols=B.stats_rep_cols,
             add_prev1_multirep=B.add_prev1_multirep,
             batch_size=B.batch_size,
@@ -735,6 +693,7 @@ def run_staged_engineering(
         drop = set(keys) | set(rep_cols)
         b_cols = [c for c in lf_b_full.collect_schema().names() if c not in drop]
         _save(lf_b_full.select([*keys, *b_cols]), f"{out_dir}/stage_b.parquet")
+
 
     # ---------- C（按操作分别输出） ----------
     if C is not None:

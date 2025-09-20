@@ -77,9 +77,9 @@ def main():
     # =========================
     # 2) 取用于筛选的日期子集
     # =========================
-    fs_cfg = cfg['dates']["feature_select_dates"]
-    fs_lo = int(fs_cfg.get("date_lo", 1000))
-    fs_hi = int(fs_cfg.get("date_hi", 1100))
+    fs_cfg = cfg['dates']["run_4_dates"]
+    fs_lo = int(fs_cfg.get("date_lo", 1250))
+    fs_hi = int(fs_cfg.get("date_hi", 1400))
     print(f"[{_now()}][fs] Selecting rows in [{fs_lo}, {fs_hi}] (inclusive)...")
 
     mask = (d >= fs_lo) & (d <= fs_hi)
@@ -101,7 +101,6 @@ def main():
 
     seed_val = int(cfg["seed"])
     top_k    = int(cfg["lgb_select"].get("top_k", 800))
-    train_lo, train_hi = cfg["dates"]["train_lo"], cfg["dates"]["train_hi"]
 
     folds = make_sliding_cv_fast(d_sub, n_splits=n_splits, gap_days=gap_days, train_to_val=ratio)
     if not folds:
@@ -249,7 +248,7 @@ def main():
         "fi_csv": fi_path,
         "features_txt": lst_path,
         "features_txt_for_training": lst4train,
-        "train_range": [int(train_lo), int(train_hi)],
+        "train_range": [int(fs_lo), int(fs_hi)],
         "cv": {"n_splits": n_splits, "gap_days": gap_days, "train_to_val": ratio},
         "lgb_params": params,
         "num_boost_round": num_boost_round,

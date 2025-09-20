@@ -76,10 +76,10 @@ def main():
     # 2) 选择“小样本日期窗”用于评测固定超参
     # =========================
     try:
-        win = cfg["dates"]["tune_dates"]
+        win = cfg["dates"]["run_6_dates"]
         lo, hi = int(win["date_lo"]), int(win["date_hi"])
     except KeyError:
-        raise RuntimeError("Please specify cfg['dates']['tune_dates'] with date_lo/date_hi.")
+        raise RuntimeError("Please specify cfg['dates']['run_6_dates'] with date_lo/date_hi.")
 
     mask = (d >= lo) & (d <= hi)
     idx  = np.flatnonzero(mask)
