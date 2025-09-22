@@ -76,7 +76,7 @@ def main():
     # 2) 选择“小样本日期窗”用于评测固定超参
     # =========================
     try:
-        win = cfg["dates"]["run_6_dates"]
+        win = cfg["dates"]["tune_dates"]
         lo, hi = int(win["date_lo"]), int(win["date_hi"])
     except KeyError:
         raise RuntimeError("Please specify cfg['dates']['run_6_dates'] with date_lo/date_hi.")

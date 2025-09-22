@@ -14,7 +14,7 @@ def _tag_from_features_path(p: str) -> str:
 
 def main():
     # ============ 0) 配置与路径 ============
-    DATE_LO, DATE_HI = int(cfg["dates"]["run_5_dates"]["date_lo"]), int(cfg["dates"]["run_5_dates"]["date_hi"])
+    DATE_LO, DATE_HI = int(cfg["dates"]["mtrain_dates"]["date_lo"]), int(cfg["dates"]["mtrain_dates"]["date_hi"])
     mm_root = P("local", cfg["paths"]["train_mm"]); ensure_dir_local(mm_root)
 
     panel_root = azify(P("az", cfg["paths"]["panel_shards"]))

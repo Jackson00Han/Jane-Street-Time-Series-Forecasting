@@ -1,4 +1,4 @@
-# run_feature_select.py
+# feature_select.py
 from __future__ import annotations
 import os, json, time, gc, hashlib
 import numpy as np
@@ -57,7 +57,7 @@ def main():
     # 0) 路径
     # =========================
     mm_root   = P("local", cfg["paths"]["fs_mm"])
-    prefix    = cfg["paths"]["fs_mm_prefix"]    # 与 run_memmap.py 保持一致
+    prefix    = cfg["paths"]["fs_mm_prefix"]    # 与 memmap_fs.py 保持一致
     rep_dir   = os.path.join(P("local", cfg["paths"]["reports"]), "fi")
     featset_dir = os.path.join(P("local", cfg.get("paths", {}).get("models", "exp/v1/models")), "feature_set")
     ensure_dir_local(rep_dir); ensure_dir_local(featset_dir)
@@ -77,7 +77,7 @@ def main():
     # =========================
     # 2) 取用于筛选的日期子集
     # =========================
-    fs_cfg = cfg['dates']["run_4_dates"]
+    fs_cfg = cfg['dates']["fs_dates"]
     fs_lo = int(fs_cfg.get("date_lo", 1250))
     fs_hi = int(fs_cfg.get("date_hi", 1400))
     print(f"[{_now()}][fs] Selecting rows in [{fs_lo}, {fs_hi}] (inclusive)...")

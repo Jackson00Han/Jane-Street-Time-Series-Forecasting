@@ -1,0 +1,46 @@
+[project]
+name = "janestreet"
+version = "0.1.0"
+description = "Jane Street – time series forecasting pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "polars==1.21.0",
+  "pyarrow==19.0.1",
+  "scikit-learn==1.7.2",
+  "lightgbm==4.6.0",
+  "optuna==4.5.0",
+  "seaborn==0.13.2",
+  "matplotlib>=3.8",
+  "tqdm>=4.66",
+  "pyyaml>=6.0",
+  "python-dotenv==1.1.1",
+  "fsspec>=2024.2.0",
+  "adlfs==2025.8.0"
+]
+
+[project.scripts]                         # 每个步骤一个命令（安装后即用）
+js-clean             = "pipeline.entrypoints.clean:main"
+js-fe                = "pipeline.entrypoints.fe:main"
+js-panel             = "pipeline.entrypoints.panel:main"
+js-memmap-fs         = "pipeline.entrypoints.memmap_fs:main"
+js-feature-selection = "pipeline.entrypoints.feature_selection:main"
+js-memmap-after-fs   = "pipeline.entrypoints.memmap_after_fs:main"
+js-tune-fixed        = "pipeline.entrypoints.tune_fixed:main"
+js-tune              = "pipeline.entrypoints.tune:main"
+js-best-iteration    = "pipeline.entrypoints.best_iteration:main"
+js-final-train       = "pipeline.entrypoints.final_train:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where   = ["src"]
+include = ["pipeline*"]
+exclude = ["tests*", "notebooks*", "data*", "config*"]

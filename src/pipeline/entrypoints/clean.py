@@ -32,14 +32,13 @@ def main():
     # 3) 读取 + 时间桶
     # ===============================
     lb = pl.scan_parquet(paths, storage_options=storage_options)
-    if "date_lo" in cfg["dates"] and "date_hi" in cfg["dates"]:
-        lb = lb.filter(
-            pl.col("date_id").is_between(
-                int(cfg["dates"]["date_lo"]),
-                int(cfg["dates"]["date_hi"]),
-                closed="both",
-            )
+    lb = lb.filter(
+        pl.col("date_id").is_between(
+            int(cfg["dates"]["clean_dates"]["date_lo"]),
+            int(cfg["dates"]["clean_dates"]["date_hi"]),
+            closed="both",
         )
+    )
 
     B = int(cfg["trading"]["bucket_size"])
     T = int(cfg["trading"]["ticks"])

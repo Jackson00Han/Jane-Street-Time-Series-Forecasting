@@ -19,7 +19,7 @@ def main():
     KEYS        = tuple(cfg["keys"])
     g_sym, g_date, g_time = KEYS
     TB = cfg['time_bucket']
-    DATA_LO, DATA_HI = cfg["dates"]["run_1_dates"]["date_lo"], cfg["dates"]["run_1_dates"]["date_hi"]
+    DATA_LO, DATA_HI = cfg["dates"]["fe_dates"]["date_lo"], cfg["dates"]["fe_dates"]["date_hi"]
     # ---- I/O ----
     clean_root = azify(P("az", cfg["paths"]["clean_shards"]))
     fe_root    = azify(P("az", cfg["paths"]["fe_shards"]))

@@ -26,7 +26,7 @@ def main():
     panel_root = azify(P("az", cfg["paths"]["panel_shards"]))
     ensure_dir_az(panel_root)
 
-    DATE_LO, DATE_HI = int(cfg['dates']["run_1_dates"]["date_lo"]), int(cfg['dates']["run_1_dates"]["date_hi"])
+    DATE_LO, DATE_HI = int(cfg['dates']["panel_dates"]["date_lo"]), int(cfg['dates']["panel_dates"]["date_hi"])
     print(f"[panel] target date range: {DATE_LO}..{DATE_HI}")
 
     # ---- 枚举需要拼接的 FE 窗口 ----
