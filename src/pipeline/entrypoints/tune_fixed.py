@@ -79,7 +79,7 @@ def main():
         win = cfg["dates"]["tune_dates"]
         lo, hi = int(win["date_lo"]), int(win["date_hi"])
     except KeyError:
-        raise RuntimeError("Please specify cfg['dates']['run_6_dates'] with date_lo/date_hi.")
+        raise RuntimeError("Please specify cfg['dates']['tune_dates'] with date_lo/date_hi.")
 
     mask = (d >= lo) & (d <= hi)
     idx  = np.flatnonzero(mask)

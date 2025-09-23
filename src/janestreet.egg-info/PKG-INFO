@@ -18,5 +18,9 @@ Requires-Dist: pyyaml>=6.0
 Requires-Dist: python-dotenv==1.1.1
 Requires-Dist: fsspec>=2024.2.0
 Requires-Dist: adlfs==2025.8.0
+Requires-Dist: torch>=2.8.0
+Requires-Dist: pytorch-lightning>=2.5.5
+Requires-Dist: pytorch-forecasting>=1.4.0
+Requires-Dist: tensorboard>=2.20.0
 
 # JS

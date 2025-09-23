@@ -21,4 +21,5 @@ src/pipeline/entrypoints/hp_tune.py
 src/pipeline/entrypoints/memmap_after_fs.py
 src/pipeline/entrypoints/memmap_fs.py
 src/pipeline/entrypoints/panel.py
+src/pipeline/entrypoints/tft_cv.py
 src/pipeline/entrypoints/tune_fixed.py
