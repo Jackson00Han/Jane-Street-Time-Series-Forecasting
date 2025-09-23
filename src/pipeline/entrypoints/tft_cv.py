@@ -37,10 +37,10 @@ def add_missing_flags_and_fill(df: pd.DataFrame, group_col: str, cont_cols: list
     return flags, df
 
 def standardize_by_symbol(train_df: pd.DataFrame,
-                          val_df: pd.DataFrame,
-                          group_col: str,
-                          cont_cols: list[str],
-                          eps: float = 1e-6):
+                        val_df: pd.DataFrame,
+                        group_col: str,
+                        cont_cols: list[str],
+                        eps: float = 1e-6):
     """按 symbol 对连续特征做标准化；val 用 train 的统计量，新 symbol 回退到 train 的全局统计。"""
     if not cont_cols:
         # 没有需要标准化的列，直接返回
@@ -117,9 +117,9 @@ def main():
     if not Path(grid_path).exists():
         lf_grid = (
             lf.select([g_date, g_time]).unique()
-              .sort([g_date, g_time])
-              .with_row_index("time_idx")
-              .with_columns(pl.col("time_idx").cast(pl.Int64))
+            .sort([g_date, g_time])
+            .with_row_index("time_idx")
+            .with_columns(pl.col("time_idx").cast(pl.Int64))
         )
         ensure_dir_local(Path(grid_path).parent.as_posix())
         lf_grid.collect(streaming=True).write_parquet(grid_path, compression="zstd")
@@ -137,8 +137,8 @@ def main():
     lw = lf.filter(pl.col(g_date).is_between(lo, hi, closed="both"))
     lw_with_idx = (
         lw.join(grid_lazy, on=[g_date, g_time], how="left")
-          .select(need_cols + ["time_idx"])
-          .sort(TIME_SORT)
+        .select(need_cols + ["time_idx"])
+        .sort(TIME_SORT)
     )
     print(f"[{_now()}][tft] schema -> {lw_with_idx.collect_schema().names()}")
 
