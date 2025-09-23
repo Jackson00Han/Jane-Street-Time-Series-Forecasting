@@ -1,0 +1,26 @@
+Metadata-Version: 2.4
+Name: janestreet
+Version: 0.1.0
+Summary: Jane Street – time series forecasting pipeline
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.24
+Requires-Dist: pandas>=2.0
+Requires-Dist: polars==1.21.0
+Requires-Dist: pyarrow==19.0.1
+Requires-Dist: scikit-learn==1.7.2
+Requires-Dist: lightgbm==4.6.0
+Requires-Dist: optuna==4.5.0
+Requires-Dist: seaborn==0.13.2
+Requires-Dist: matplotlib>=3.8
+Requires-Dist: tqdm>=4.66
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: python-dotenv==1.1.1
+Requires-Dist: fsspec>=2024.2.0
+Requires-Dist: adlfs==2025.8.0
+Requires-Dist: torch>=2.8.0
+Requires-Dist: pytorch-lightning>=2.5.5
+Requires-Dist: pytorch-forecasting>=1.4.0
+Requires-Dist: tensorboard>=2.20.0
+
+# JS
