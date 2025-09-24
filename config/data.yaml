@@ -213,6 +213,16 @@ lgb_best:
   lambda_l1: 3.005575058716044
   min_gain_to_split: 0.07080725777960455
 
+tft:
+  lr: 1e-4
+  precision: 32
+  hidden_size: 128
+  heads: 4
+  dropout: 0.2
+  enc_len: 30
+  batch_size: 1024
+  max_epochs: 2
+  grad_clip: 0.25
 
 
 # --------- 列级白名单（强约束，防止隐形泄露） ---------
