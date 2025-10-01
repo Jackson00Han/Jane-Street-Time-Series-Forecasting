@@ -3,6 +3,7 @@ from functools import cached_property
 from typing import Sequence, Dict, Any, List, Tuple, Optional
 import random
 
+
 def _per_item_rng(seed: Optional[int], group: str, start: int) -> random.Random | None:
     if seed is None:
         return None
@@ -54,6 +55,40 @@ class MultiWindowDataset_Step2:
         self.groups = list(series_map.keys())
         self.series = [list(series_map[g]) for g in self.groups]
 
+        # ---- 一致性校验：协变量长度必须与主序列相同 ----
+        for g, seq in zip(self.groups, self.series):
+            L = len(seq)
+
+        # （可选）如果协变量映射里出现了“未知 group”，也要明确报错
+        extra_past = set(self.past_cov_map) - set(self.groups)
+        extra_fut  = set(self.future_cov_map) - set(self.groups)
+        if extra_past:
+            raise ValueError(f"[past_cov_map] unknown groups: {sorted(extra_past)}")
+        if extra_fut:
+            raise ValueError(f"[future_cov_map] unknown groups: {sorted(extra_fut)}")
+
+        # 说明性注释（不必写代码）：starts_per_group 用 enc_len+max_dec_len 做最大窗口，
+        # 这样即使 predict_mode=True，我们也保证“未来协变量有足够长度”可切片。
+
+
+        if g in self.past_cov_map:
+            rows = self.past_cov_map[g]
+            if len(rows) != L:
+                raise ValueError(f"[past_cov_map] group={g}: length {len(rows)} != series length {L}")
+            # 行内维度一致性（可选但推荐）
+            if len(rows) > 0:
+                F = len(rows[0])
+                if any(len(r) != F for r in rows):
+                    raise ValueError(f"[past_cov_map] group={g}: feature dims not consistent within rows")
+
+        if g in self.future_cov_map:
+            rows = self.future_cov_map[g]
+            if len(rows) != L:
+                raise ValueError(f"[future_cov_map] group={g}: length {len(rows)} != series length {L}")
+            if len(rows) > 0:
+                F = len(rows[0])
+                if any(len(r) != F for r in rows):
+                    raise ValueError(f"[future_cov_map] group={g}: feature dims not consistent within rows")
 
     @cached_property
     def starts_per_group(self) -> List[List[int]]:
@@ -143,13 +178,8 @@ class MultiWindowDataset_Step2:
             "static": self.static_map.get(group, None),
             "past_cov_enc": past_enc,
             "future_cov_dec": fut_dec,
-            "decoder": dec,
             "has_target": has_target
         }
-
-
-
-from typing import List, Dict, Any
 
 def _pad_2d_rows(rows: List[List[float]], pad_rows: int) -> List[List[float]]:
     feat_dim = len(rows[0]) if rows else 0
@@ -175,6 +205,7 @@ def multi_collate_pad_plus(
     dec_lens    = [b["dec_len"] for b in batch]
     scales      = [b["target_scale"] for b in batch]
     statics     = [b.get("static") for b in batch]  # 现在可能全是 None
+    has_target  = [b["has_target"] for b in batch]
 
     max_enc_len = max(enc_lens) if enc_lens else 0
     max_dec_len = max(dec_lens) if dec_lens else 0
@@ -205,6 +236,7 @@ def multi_collate_pad_plus(
         "decoder_time_idx": decoder_time_idx,
         "target_scale": scales,
         "statics": statics,
+        "has_target": has_target
     }
 
     if has_past:
@@ -255,7 +287,8 @@ def main():
         "A": make_rows(12, 1, start=200),
         "B": make_rows(9,  1, start=300),
     }
-
+        
+    # 训练模式数据集（has_target=True）
     ds2 = MultiWindowDataset_Step2(
         series_map,
         enc_len=5, dec_len=2,
@@ -265,13 +298,10 @@ def main():
         static_map=None,
         past_cov_map=past_cov_map,
         future_cov_map=future_cov_map,
+        predict_mode=False,    # 训练模式
     )
 
-    x0 = ds2[0]
-    print("x0 enc_len/dec_len:", x0["enc_len"], x0["dec_len"])
-    print("x0 target_scale:", x0["target_scale"])
-
-    # 开启预测模式（用同一份 series_map/past_cov_map/future_cov_map）
+    # 预测模式数据集（has_target=False）
     ds_pred = MultiWindowDataset_Step2(
         series_map,
         enc_len=5, dec_len=3,
@@ -281,14 +311,17 @@ def main():
         static_map=None,
         past_cov_map=past_cov_map,
         future_cov_map=future_cov_map,
-        predict_mode=True,           # ← 开启预测模式
+        predict_mode=True,     # 预测模式
         pad_value=0,
     )
 
-    y0 = ds_pred[0]
-    print("predict mode — has_target:", y0["has_target"])
-    print("predict mode — decoder:", y0["decoder"])
-    print("predict mode — future_cov_dec len:", len(y0["future_cov_dec"]) if y0["future_cov_dec"] else None)
+    # collate 测试
+    c_train = multi_collate_pad_plus([ds2[0], ds2[1]])
+    print("train has_target:", c_train["has_target"])  # 期望 [True, True]
+
+    c_pred = multi_collate_pad_plus([ds_pred[0], ds_pred[1]])
+    print("pred has_target:", c_pred["has_target"])    # 期望 [False, False]
+
 
 
 # ------------------ Demo ------------------
