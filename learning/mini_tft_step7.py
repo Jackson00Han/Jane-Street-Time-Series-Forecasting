@@ -59,7 +59,6 @@ class MiniTFT_Step7(nn.Module):
 
         # TODO 1: 编码器前向：把 enc_h 喂给 self.lstm_enc，初态用 (h0_l, c0_l)
         # enc_out: (B,Te,H); (hT, cT): (1,B,H)
-        
         enc_out, (hT, cT) = self.lstm_enc(enc_h, (h0_l, c0_l))
 
         # TODO 2: 解码器前向：把 dec_h 喂给 self.lstm_dec，初态用 (hT, cT)
