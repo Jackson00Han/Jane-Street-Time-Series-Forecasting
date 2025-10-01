@@ -23,6 +23,8 @@ class MultiWindowDataset_Step2:
         static_map: Optional[Dict[str, Dict[str, Any]]] = None,
         past_cov_map: Optional[Dict[str, Sequence[Sequence[float | int]]]] = None,
         future_cov_map: Optional[Dict[str, Sequence[Sequence[float | int]]]] = None,
+        predict_mode: bool = False,
+        pad_value: float | int = 0,
     ):
         # ---- 基本参数（复制你单序列版的校验风格即可）----
         self.enc_len = int(enc_len)
@@ -34,6 +36,8 @@ class MultiWindowDataset_Step2:
         self.static_map = static_map or {}
         self.past_cov_map = past_cov_map or {}
         self.future_cov_map = future_cov_map or {}
+        self.predict_mode = predict_mode
+        self.pad_value = pad_value
 
         # TODO: 参数校验（与单序列版一致：enc/dec 正数，min_enc_len 范围，dec_len<=max_dec_len）
         if self.enc_len <= 0 or self.dec_len <= 0:
@@ -99,9 +103,15 @@ class MultiWindowDataset_Step2:
 
             enc_len = new_enc
             dec_len = new_dec
-
+        
         enc = seq[start : start + enc_len]
         dec = seq[start + enc_len : start + enc_len + dec_len]
+        if self.predict_mode:
+            dec = [self.pad_value] * dec_len
+            has_target = False
+        else:
+            dec = seq[start + enc_len : start + enc_len + dec_len]
+            has_target = True
         
         past_enc = None
         if group in self.past_cov_map:
@@ -133,26 +143,11 @@ class MultiWindowDataset_Step2:
             "static": self.static_map.get(group, None),
             "past_cov_enc": past_enc,
             "future_cov_dec": fut_dec,
+            "decoder": dec,
+            "has_target": has_target
         }
 
-def to_loader_multi(
-    ds,
-    batch_size: int,
-    shuffle: bool = True,
-    drop_last: bool = True,
-    seed: Optional[int] = None,
-):
-    idxs = list(range(len(ds)))
-    if shuffle:
-        rng = random.Random(seed)
-        rng.shuffle(idxs)
 
-    for i in range(0, len(idxs), batch_size):
-        chunk = idxs[i:i+batch_size]
-        if drop_last and len(chunk) < batch_size:
-            continue
-        batch_items = [ds[j] for j in chunk]
-        yield multi_collate_pad_plus(batch_items)
 
 from typing import List, Dict, Any
 
@@ -275,6 +270,26 @@ def main():
     x0 = ds2[0]
     print("x0 enc_len/dec_len:", x0["enc_len"], x0["dec_len"])
     print("x0 target_scale:", x0["target_scale"])
+
+    # 开启预测模式（用同一份 series_map/past_cov_map/future_cov_map）
+    ds_pred = MultiWindowDataset_Step2(
+        series_map,
+        enc_len=5, dec_len=3,
+        min_enc_len=3, max_dec_len=4,
+        randomize_length=(0.7, 0.7),
+        random_seed=42,
+        static_map=None,
+        past_cov_map=past_cov_map,
+        future_cov_map=future_cov_map,
+        predict_mode=True,           # ← 开启预测模式
+        pad_value=0,
+    )
+
+    y0 = ds_pred[0]
+    print("predict mode — has_target:", y0["has_target"])
+    print("predict mode — decoder:", y0["decoder"])
+    print("predict mode — future_cov_dec len:", len(y0["future_cov_dec"]) if y0["future_cov_dec"] else None)
+
 
 # ------------------ Demo ------------------
 if __name__ == "__main__":
