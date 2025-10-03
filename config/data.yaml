@@ -34,6 +34,8 @@ paths:
   sample_fe:    "sample_fe"             # 采样后的特征（可选）
   panel_shards: "panel_shards"          # 面板化分片
 
+  tft:        "tft"               # tft 专用目录
+
   fs_mm:    "fs_mm"             # 采样内存映射（本地）
   train_mm:     "train_mm"              # 面板内存映射（本地）
 
