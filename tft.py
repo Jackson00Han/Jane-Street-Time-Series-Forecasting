@@ -28,9 +28,11 @@ from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
 from pytorch_forecasting.metrics import MAE, RMSE
 from pytorch_forecasting.data.encoders import NaNLabelEncoder
 
+from pytorch_forecasting.data.encoders import GroupNormalizer
+
 # 你的工程工具
 from pipeline.io import cfg, P, fs, storage_options, ensure_dir_local, ensure_dir_az
-from pipeline.stream_input import ShardedBatchStream  # 你已实现好的 IterableDataset
+from pipeline.stream_input_local import ShardedBatchStream  # 你已实现好的 IterableDataset
 from pipeline.wr2 import WeightedR2
 
 # ---- 性能/兼容开关（仅一次）----
@@ -93,23 +95,26 @@ def main():
     ENC_LEN      = 512
     DEC_LEN      = 1
     PRED_LEN     = DEC_LEN
-    BATCH_SIZE   = 1024
+    BATCH_SIZE   = 256
     LR           = 1e-3
     HIDDEN       = 16
-    HEADS        = 2
+    HEADS        = 1
     DROPOUT      = 0.1
-    MAX_EPOCHS   = 10
+    MAX_EPOCHS   = 20
     CHUNK_DAYS   = 20  
 
     # 数据路径
     PANEL_DIR_AZ   = P("az", cfg["paths"].get("panel_shards", "panel_shards"))
-    TFT_AZ_ROOT    = P("az", "tft")
+    #TFT_AZ_ROOT    = P("az", "tft")
     TFT_LOCAL_ROOT = P("local", "tft")
 
     # 目录准备
-    ensure_dir_az(TFT_AZ_ROOT)
-    CLEAN_DIR_AZ = f"{TFT_AZ_ROOT}/clean"; ensure_dir_az(CLEAN_DIR_AZ)
+    
+    #ensure_dir_az(TFT_AZ_ROOT)
+    #CLEAN_DIR_AZ = f"{TFT_AZ_ROOT}/clean"; ensure_dir_az(CLEAN_DIR_AZ)
+    
     ensure_dir_local(TFT_LOCAL_ROOT)
+    LOCAL_CLEAN_DIR = f"{TFT_LOCAL_ROOT}/clean"; ensure_dir_local(LOCAL_CLEAN_DIR)
     CKPTS_DIR = Path(TFT_LOCAL_ROOT) / "ckpts"; ensure_dir_local(CKPTS_DIR.as_posix())
     LOGS_DIR  = Path(TFT_LOCAL_ROOT) / "logs";  ensure_dir_local(LOGS_DIR.as_posix())
 
@@ -147,6 +152,7 @@ def main():
     )
     folds_by_day = make_sliding_cv_by_days(all_days, n_splits=N_SPLITS, gap_days=GAP_DAYS, train_to_val=TRAIN_TO_VAL)
     assert len(folds_by_day) > 0, "no CV folds constructed"
+    
     stats_hi = int(folds_by_day[0][0][-1])
     print(f"[stats] upper bound day for z-score = {stats_hi}")
 
@@ -201,42 +207,68 @@ def main():
 
     for ci, chunk in enumerate(day_chunks, 1):
         df_chunk = lf_out.filter(pl.col(G_DATE).is_in(chunk)).collect()
-        table = df_chunk.to_arrow()
 
-        chunk_dir = f"{CLEAN_DIR_AZ}/chunk_{chunk[0]:04d}_{chunk[-1]:04d}"
-        ds.write_dataset(
-            data=table,
-            base_dir=chunk_dir,
-            filesystem=fs,
-            format="parquet",
-            partitioning=None,
-            existing_data_behavior="overwrite_or_ignore",
-            basename_template="data-{i}.parquet",
-            max_rows_per_file=50_000_000,
-        )
-        print(f"[{_now()}] chunk {ci}/{len(day_chunks)} -> days {chunk[0]}..{chunk[-1]} written")
+        # 本地目录
+        local_chunk_dir = f"{LOCAL_CLEAN_DIR}/chunk_{chunk[0]:04d}_{chunk[-1]:04d}"
+        Path(local_chunk_dir).mkdir(parents=True, exist_ok=True)
 
-    print(fs.ls(CLEAN_DIR_AZ)[:5])
+        # 本地单文件（足够大，吞吐高）
+        #df_chunk.write_parquet(f"{local_chunk_dir}/data-0.parquet", compression="zstd")
+        df_chunk.write_ipc(f"{local_chunk_dir}/data.feather")
+        print(f"[{_now()}] chunk {ci}/{len(day_chunks)} -> days {chunk[0]}..{chunk[-1]} written (local)")
+    #for ci, chunk in enumerate(day_chunks, 1):
+    #    df_chunk = lf_out.filter(pl.col(G_DATE).is_in(chunk)).collect()
+    #    table = df_chunk.to_arrow()
+
+    #    chunk_dir = f"{CLEAN_DIR_AZ}/chunk_{chunk[0]:04d}_{chunk[-1]:04d}"
+    #    ds.write_dataset(
+    #        data=table,
+    #        base_dir=chunk_dir,
+    #        filesystem=fs,
+    #        format="parquet",
+    #        partitioning=None,
+    #        existing_data_behavior="overwrite_or_ignore",
+    #        basename_template="data-{i}.parquet",
+    #        max_rows_per_file=50_000_000,
+    #    )
+    #    print(f"[{_now()}] chunk {ci}/{len(day_chunks)} -> days {chunk[0]}..{chunk[-1]} written")
+    #print(fs.ls(CLEAN_DIR_AZ)[:5])
 
     # ========== 6) 归并 chunk → 路径清单 ==========
-    entries = fs.ls(CLEAN_DIR_AZ)
-    chunk_dirs: list[str] = []
-    for e in entries:
-        path = e if isinstance(e, str) else (e.get("name") or e.get("path") or e.get("Key") or str(e))
-        if path.rstrip("/").split("/")[-1].startswith("chunk_"):
-            chunk_dirs.append(path if path.startswith("az://") else f"az://{path}")
-    chunk_dirs = sorted(chunk_dirs)
+    # 只扫本地
+    chunk_dirs = sorted(
+        p.as_posix() for p in Path(LOCAL_CLEAN_DIR).glob("chunk_*") if p.is_dir()
+    )
 
-    chunk2paths: dict[str, list[str]] = defaultdict(list)
+    chunk2paths: dict[str, list[str]] = {}
     for cdir in chunk_dirs:
-        paths = fs.glob(f"{cdir}/*.parquet")
-        paths = [p if p.startswith("az://") else f"az://{p}" for p in paths]
+        paths = sorted(p.as_posix() for p in Path(cdir).glob("*.parquet"))
         if not paths:
             print(f"[WARN] empty chunk: {cdir}")
         chunk2paths[cdir] = paths
 
     all_paths = [p for plist in chunk2paths.values() for p in plist]
-    print(f"[prep] {len(chunk_dirs)} chunks; {len(all_paths)} files total")
+    print(f"[prep] {len(chunk_dirs)} local chunks; {len(all_paths)} files total")
+
+
+    #entries = fs.ls(CLEAN_DIR_AZ)
+    #chunk_dirs: list[str] = []
+    #for e in entries:
+    #    path = e if isinstance(e, str) else (e.get("name") or e.get("path") or e.get("Key") or str(e))
+    #    if path.rstrip("/").split("/")[-1].startswith("chunk_"):
+    #        chunk_dirs.append(path if path.startswith("az://") else f"az://{path}")
+    #chunk_dirs = sorted(chunk_dirs)
+
+    #chunk2paths: dict[str, list[str]] = defaultdict(list)
+    #for cdir in chunk_dirs:
+    #    paths = fs.glob(f"{cdir}/*.parquet")
+    #    paths = [p if p.startswith("az://") else f"az://{p}" for p in paths]
+    #    if not paths:
+    #        print(f"[WARN] empty chunk: {cdir}")
+    #    chunk2paths[cdir] = paths
+
+    #all_paths = [p for plist in chunk2paths.values() for p in plist]
+    #print(f"[prep] {len(chunk_dirs)} chunks; {len(all_paths)} files total")
 
     # ========== 7) 训练列选择 ==========
     UNKNOWN_REALS = Z_COLS + NAMARK_COLS + TIME_FEATURES
@@ -304,11 +336,11 @@ def main():
         validation = TimeSeriesDataSet.from_dataset(template, data=pdf_val, stop_randomization=True)
         val_loader = validation.to_dataloader(
             train=False,
-            batch_size=BATCH_SIZE * 2,
-            num_workers=min(8, max(1, os.cpu_count() - 2)),
+            batch_size=512,
+            num_workers=2, #min(8, max(1, os.cpu_count() - 2)),
             pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=4,
+            persistent_workers=False,
+            prefetch_factor=2,
         )
 
         # 8.5 训练流（按 chunk 一次读取；若需严格时间顺序，在类里关闭 shuffle
@@ -322,8 +354,8 @@ def main():
             train_period=train_period,
             g_sym=G_SYM,
             g_date=G_DATE,
-            batch_size=max(256, BATCH_SIZE),
-            buffer_batches=0,
+            batch_size=512,
+            buffer_batches=8,
             seed=42,
             cols=TRAIN_COLS,
             print_every_chunks=1,
@@ -331,9 +363,9 @@ def main():
         train_loader = DataLoader(
             train_stream,
             batch_size=None,
-            num_workers=min(8, max(1, os.cpu_count() - 2)),
-            persistent_workers=True,
-            prefetch_factor=2,
+            num_workers=4,
+            persistent_workers=False,
+            prefetch_factor=4,
             pin_memory=True,
             multiprocessing_context="spawn",
         )
@@ -375,14 +407,14 @@ def main():
             max_epochs=MAX_EPOCHS,
             num_sanity_val_steps=0,
             gradient_clip_val=0.5,
-            log_every_n_steps=20,
+            log_every_n_steps=200,
             enable_progress_bar=True,
             enable_model_summary=False,
             callbacks=callbacks,
             logger=logger,
             default_root_dir=CKPTS_DIR.as_posix(),
             
-            #limit_train_batches=200,
+            limit_train_batches=1000,
         )
         
         # 在创建 trainer 之后立即
@@ -393,10 +425,10 @@ def main():
             template,
             loss=MAE(),
             logging_metrics=[WeightedR2()],
-            learning_rate=float(cfg.get("tft", {}).get("lr", LR)),
-            hidden_size=int(cfg.get("tft", {}).get("hidden_size", HIDDEN)),
-            attention_head_size=int(cfg.get("tft", {}).get("heads", HEADS)),
-            dropout=float(cfg.get("tft", {}).get("dropout", DROPOUT)),
+            learning_rate=LR,
+            hidden_size=HIDDEN,
+            attention_head_size=HEADS,
+            dropout=DROPOUT,
             reduce_on_plateau_patience=4,
         )
 
