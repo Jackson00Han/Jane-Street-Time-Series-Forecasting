@@ -7,6 +7,8 @@ import time
 import random
 from pathlib import Path
 from collections import defaultdict
+from datetime import datetime
+
 
 # ── 第三方 ──────────────────────────────────────────────────────────────────
 import numpy as np
@@ -29,6 +31,7 @@ from pytorch_forecasting.data.encoders import NaNLabelEncoder
 # 你的工程工具
 from pipeline.io import cfg, P, fs, storage_options, ensure_dir_local, ensure_dir_az
 from pipeline.stream_input import ShardedBatchStream  # 你已实现好的 IterableDataset
+from pipeline.wr2 import WeightedR2
 
 # ---- 性能/兼容开关（仅一次）----
 os.environ.setdefault("POLARS_MAX_THREADS", str(max(1, os.cpu_count() // 2)))
@@ -63,7 +66,6 @@ def make_sliding_cv_by_days(all_days: np.ndarray, *, n_splits: int, gap_days: in
         v_lo = v_hi
     return folds
 
-
 # ───────────────────────────────────────────────────────────────────────────
 def main():
     print(f"[{_now()}] imports ok")
@@ -78,21 +80,26 @@ def main():
     TIME_FEATURES = ["time_pos", "time_sin", "time_cos", "time_bucket"]
 
     # 原始连续特征（先用一列试跑；后续替换为 TopK）
-    RAW_FEATURES = ["feature_36"]
-
+    BASIC_FEATURES = ["feature_36", "feature_06", "feature_04", "feature_16", "feature_69", "feature_22"]
+    #EWM_FEATURES = ["feature_08__ewm5", "feature_16__ewm5", "feature_01__ewm5", "feature_38__ewm5"]
+    #RESP_FEATURES = ["responder_5_prevday_std", "responder_3_prevday_std", "responder_4_prev_tail_d1", "responder_7_prevday_std", "responder_8_prevday_mean"]
+    RAW_FEATURES = BASIC_FEATURES
+    
+    
     # 训练 & CV 超参
-    N_SPLITS     = 1
-    GAP_DAYS     = 0
-    TRAIN_TO_VAL = 2
-    ENC_LEN      = 10
-    PRED_LEN     = 1
+    N_SPLITS     = 2
+    GAP_DAYS     = 7
+    TRAIN_TO_VAL = 4
+    ENC_LEN      = 512
+    DEC_LEN      = 1
+    PRED_LEN     = DEC_LEN
     BATCH_SIZE   = 1024
-    LR           = 1e-2
+    LR           = 1e-3
     HIDDEN       = 16
-    HEADS        = 1
+    HEADS        = 2
     DROPOUT      = 0.1
-    MAX_EPOCHS   = 2
-    CHUNK_DAYS   = 2   
+    MAX_EPOCHS   = 10
+    CHUNK_DAYS   = 20  
 
     # 数据路径
     PANEL_DIR_AZ   = P("az", cfg["paths"].get("panel_shards", "panel_shards"))
@@ -112,13 +119,13 @@ def main():
     data_paths = fs.glob(f"{PANEL_DIR_AZ}/*.parquet")
     data_paths = [p if p.startswith("az://") else f"az://{p}" for p in data_paths]
     lf_data = pl.scan_parquet(data_paths, storage_options=storage_options)
-    lf_data = lf_data.filter(pl.col(G_DATE).is_between(1650, 1655, closed="both"))   # 含端点
+    lf_data = lf_data.filter(pl.col(G_DATE).is_between(1610, 1680, closed="both"))   # 含端点
 
     lf_grid = (
         lf_data.select([G_DATE, G_TIME]).unique()
-               .sort([G_DATE, G_TIME])
-               .with_row_index("time_idx")
-               .with_columns(pl.col("time_idx").cast(pl.Int64))
+            .sort([G_DATE, G_TIME])
+            .with_row_index("time_idx")
+            .with_columns(pl.col("time_idx").cast(pl.Int64))
     )
     grid_path_local = P("local", "tft/panel/grid_timeidx.parquet")
     ensure_dir_local(Path(grid_path_local).parent.as_posix())
@@ -128,15 +135,15 @@ def main():
     NEED_COLS = list(dict.fromkeys([G_SYM, G_DATE, G_TIME, WEIGHT_COL, TARGET_COL] + TIME_FEATURES + RAW_FEATURES))
     lf0 = (
         lf_data.join(grid_lazy, on=[G_DATE, G_TIME], how="left")
-               .select(NEED_COLS + ["time_idx"])
-               .sort([G_DATE, G_TIME, G_SYM])
+            .select(NEED_COLS + ["time_idx"])
+            .sort([G_DATE, G_TIME, G_SYM])
     )
     print(f"[{_now()}] lazyframe ready")
 
     # ========== 3) CV 划分 ==========
     all_days = (
         lf0.select(pl.col(G_DATE)).unique().sort(by=G_DATE)
-           .collect(streaming=True).get_column(G_DATE).to_numpy()
+        .collect(streaming=True).get_column(G_DATE).to_numpy()
     )
     folds_by_day = make_sliding_cv_by_days(all_days, n_splits=N_SPLITS, gap_days=GAP_DAYS, train_to_val=TRAIN_TO_VAL)
     assert len(folds_by_day) > 0, "no CV folds constructed"
@@ -150,15 +157,15 @@ def main():
 
     lf_clean = (
         lf0.with_columns(inf2null_exprs)
-           .with_columns(isna_flag_exprs)
-           .with_columns(ffill_exprs)
+        .with_columns(isna_flag_exprs)
+        .with_columns(ffill_exprs)
     )
 
     lf_stats_sym = (
         lf_clean.filter(pl.col(G_DATE) <= stats_hi)
                 .group_by(G_SYM)
                 .agg([pl.col(c).mean().alias(f"mu_{c}") for c in RAW_FEATURES] +
-                     [pl.col(c).std(ddof=0).alias(f"std_{c}") for c in RAW_FEATURES])
+                    [pl.col(c).std(ddof=0).alias(f"std_{c}") for c in RAW_FEATURES])
     )
     lf_stats_glb = (
         lf_clean.filter(pl.col(G_DATE) <= stats_hi)
@@ -240,19 +247,20 @@ def main():
 
     for fold_id, (train_days, val_days) in enumerate(folds_by_day, start=1):
         print(f"[fold {fold_id}] train {train_days[0]}..{train_days[-1]} ({len(train_days)} days), "
-              f"val {val_days[0]}..{val_days[-1]} ({len(val_days)} days)")
-
+            f"val {val_days[0]}..{val_days[-1]} ({len(val_days)} days)")
+        
+        
         # 8.1 Template（用训练起始前 N 天固化编码/缩放配置）
         days_sorted = np.sort(train_days)
-        TEMPLATE_DAYS = min(1, len(days_sorted))
+        TEMPLATE_DAYS = min(5, len(days_sorted))
         tmpl_days = list(map(int, days_sorted[:TEMPLATE_DAYS]))
 
         pdf_tmpl = (
             pl.scan_parquet(all_paths, storage_options=storage_options)
-              .filter(pl.col(G_DATE).is_in(tmpl_days))
-              .select(TRAIN_COLS)
-              .collect(streaming=True)
-              .to_pandas()
+            .filter(pl.col(G_DATE).is_in(tmpl_days))
+            .select(TRAIN_COLS)
+            .collect(streaming=True)
+            .to_pandas()
         )
         pdf_tmpl[G_SYM] = pdf_tmpl[G_SYM].astype("str")
         pdf_tmpl.sort_values([G_SYM, "time_idx"], inplace=True)
@@ -261,10 +269,10 @@ def main():
         # 8.2 验证集
         pdf_val = (
             pl.scan_parquet(all_paths, storage_options=storage_options)
-              .filter(pl.col(G_DATE).is_in(list(map(int, val_days))))
-              .select(TRAIN_COLS)
-              .collect(streaming=True)
-              .to_pandas()
+            .filter(pl.col(G_DATE).is_in(list(map(int, val_days))))
+            .select(TRAIN_COLS)
+            .collect(streaming=True)
+            .to_pandas()
         )
         pdf_val[G_SYM] = pdf_val[G_SYM].astype("str")
         pdf_val.sort_values([G_SYM, "time_idx"], inplace=True)
@@ -297,18 +305,23 @@ def main():
         val_loader = validation.to_dataloader(
             train=False,
             batch_size=BATCH_SIZE * 2,
-            num_workers=0, #min(8, max(1, os.cpu_count() - 2)),
+            num_workers=min(8, max(1, os.cpu_count() - 2)),
             pin_memory=True,
-            persistent_workers=False, #True,
-            #prefetch_factor=4,
+            persistent_workers=True,
+            prefetch_factor=4,
         )
 
-        # 8.5 训练流（按 chunk 一次读取；若需严格时间顺序，在类里关闭 shuffle）
+        # 8.5 训练流（按 chunk 一次读取；若需严格时间顺序，在类里关闭 shuffle
+        start_date = train_days[0]
+        end_date = train_days[-1]
+        train_period = (start_date, end_date)
         train_stream = ShardedBatchStream(
             template_tsd=template,
             chunk_dirs=chunk_dirs,
             chunk2paths=chunk2paths,
+            train_period=train_period,
             g_sym=G_SYM,
+            g_date=G_DATE,
             batch_size=max(256, BATCH_SIZE),
             buffer_batches=0,
             seed=42,
@@ -318,11 +331,11 @@ def main():
         train_loader = DataLoader(
             train_stream,
             batch_size=None,
-            num_workers=0, #min(8, max(1, os.cpu_count() - 2)),
-            persistent_workers=False, #True,
-            #prefetch_factor=2,
+            num_workers=min(8, max(1, os.cpu_count() - 2)),
+            persistent_workers=True,
+            prefetch_factor=2,
             pin_memory=True,
-            #multiprocessing_context="spawn",
+            multiprocessing_context="spawn",
         )
 
         # 8.6 callbacks/logger/trainer
@@ -330,18 +343,33 @@ def main():
         ensure_dir_local(ckpt_dir_fold.as_posix())
 
         callbacks = [
-            EarlyStopping(monitor="val_RMSE", mode="min", patience=1),
+            EarlyStopping(monitor="val_WeightedR2", mode="max", patience=3),
             ModelCheckpoint(
-                monitor="val_RMSE",
-                mode="min",
+                monitor="val_WeightedR2",
+                mode="max",
                 save_top_k=1,
                 dirpath=ckpt_dir_fold.as_posix(),
-                filename=f"fold{fold_id}-tft-best-{{epoch:02d}}-{{val_RMSE:.5f}}",
+                filename=f"fold{fold_id}-tft-best-{{epoch:02d}}-{{val_WeightedR2:.5f}}",
             ),
             LearningRateMonitor(logging_interval="step"),
         ]
-        logger = TensorBoardLogger(save_dir=LOGS_DIR.as_posix(), name=f"tft_f{fold_id}", default_hp_metric=False)
-
+        RUN_NAME = (
+            f"f{fold_id}"
+            f"_E{MAX_EPOCHS}"
+            f"_lr{LR}"
+            f"_bs{BATCH_SIZE}"
+            f"_enc{ENC_LEN}_dec{DEC_LEN}"
+            f"_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        )
+        logger = TensorBoardLogger(
+            save_dir=LOGS_DIR.as_posix(), 
+            name=f"tft", 
+            version=RUN_NAME,
+            default_hp_metric=False
+        )
+        
+        print(f"[run] name={logger.name}  version={logger.version}  log_dir={logger.log_dir}")
+        
         trainer = L.Trainer(
             accelerator="gpu", devices=1, precision="bf16-mixed",
             max_epochs=MAX_EPOCHS,
@@ -354,14 +382,17 @@ def main():
             logger=logger,
             default_root_dir=CKPTS_DIR.as_posix(),
             
-            limit_train_batches=200,
+            #limit_train_batches=200,
         )
+        
+        # 在创建 trainer 之后立即
+        trainer.logger.log_hyperparams({"run_name": RUN_NAME})
 
         # 8.7 模型并训练
         tft = TemporalFusionTransformer.from_dataset(
             template,
             loss=MAE(),
-            logging_metrics=[RMSE()],
+            logging_metrics=[WeightedR2()],
             learning_rate=float(cfg.get("tft", {}).get("lr", LR)),
             hidden_size=int(cfg.get("tft", {}).get("hidden_size", HIDDEN)),
             attention_head_size=int(cfg.get("tft", {}).get("heads", HEADS)),
@@ -387,8 +418,8 @@ def main():
         fold_metrics.append(float(ckpt_cb.best_model_score))
         setattr(main, "_fold_metrics", fold_metrics)
 
-        cv_rmse = np.mean(fold_metrics)
-        print(f"[CV] mean val_RMSE = {cv_rmse:.6f}".replace("cv_rmSE", "cv_rmse"))
+        cv_wr2 = np.mean(fold_metrics)
+        print(f"[CV] mean val_wr2 = {cv_wr2:.6f}")
 
     print("[done] best_ckpts =", getattr(main, "_best_ckpt_paths", []))
 
