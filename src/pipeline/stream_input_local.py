@@ -1,22 +1,26 @@
 # --- 必需的标准库 ---
 from __future__ import annotations
 from collections import deque
+import os
 import random
 from typing import List, Dict, Tuple, Optional, Iterable
 
 # --- 第三方 ---
-import numpy as np
-import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pyarrow.feather as ft
 from torch.utils.data import IterableDataset, get_worker_info
 from pytorch_forecasting import TimeSeriesDataSet
 
+
 class ShardedBatchStream(IterableDataset):
+    """
+    每个 chunk 只读一次 → 内存构建 TSDS → 内层 DataLoader(并行打包/切窗) → 产出 batch。
+    外层 DataLoader 再用 persistent_workers + prefetch 做搬运。
+    """
     def __init__(self, template_tsd, chunk_dirs, chunk2paths, train_period,
                  g_sym, g_date, batch_size=512, buffer_batches=8, seed=42,
-                 cols=None, print_every_chunks=1, file_format="parquet"):
+                 cols=None, print_every_chunks=1, file_format="feather"):
         super().__init__()
         self.template = template_tsd
         self.chunk_dirs  = list(chunk_dirs)
@@ -31,7 +35,7 @@ class ShardedBatchStream(IterableDataset):
         self.print_every_chunks = int(print_every_chunks)
         self.file_format = file_format.lower()
 
-        # ✅ 读表列：一定包含 date、time_idx、group，避免后续 KeyError
+        # 读表列：一定包含 date、time_idx、group，避免后续 KeyError
         must_cols = [self.g_date, "time_idx", self.g_sym]
         self.read_cols = sorted(set((self.cols or []) + must_cols))
 
@@ -41,33 +45,31 @@ class ShardedBatchStream(IterableDataset):
 
         print(f"[ShardedBatchStream] 使用的chunk: {self.chunk_dirs}")
 
+    def __len__(self) -> int:
+        # 用 date 列粗估，按 batch_size 折算步数；给 Lightning 进度用
+        try:
+            total_rows = 0
+            for cdir in self.chunk_dirs:
+                paths = self.chunk2paths.get(cdir, [])
+                if not paths:
+                    continue
+                if self.file_format == "feather":
+                    t = ft.read_table(paths[0], columns=[self.g_date], memory_map=True)
+                else:
+                    t = pq.read_table(paths, columns=[self.g_date], memory_map=True)
+                d = t[self.g_date].to_numpy()
+                if self.train_period is not None:
+                    lo, hi = self.train_period
+                    total_rows += int(((d >= lo) & (d <= hi)).sum())
+                else:
+                    total_rows += len(d)
+            return max(1, total_rows // max(1, self.bs))
+        except Exception:
+            return 1
 
-        def __len__(self) -> int:
-            # 仅用 date 列粗估，避免读全表；按 batch_size 折算步数
-            try:
-                total_rows = 0
-                for cdir in self.chunk_dirs:
-                    paths = self.chunk2paths.get(cdir, [])
-                    if not paths:
-                        continue
-                    if self.file_format == "feather":
-                        # feather 单文件
-                        t = ft.read_table(paths[0], columns=[self.g_date], memory_map=True)
-                    else:
-                        t = pq.read_table(paths, columns=[self.g_date], memory_map=True)
-                    d = t[self.g_date].to_numpy()
-                    if self.train_period is not None:
-                        lo, hi = self.train_period
-                        total_rows += int(((d >= lo) & (d <= hi)).sum())
-                    else:
-                        total_rows += len(d)
-                return max(1, total_rows // max(1, self.bs))
-            except Exception:
-                return 1
-            
-            
     @staticmethod
     def _parse_chunk_span(cdir: str):
+        # .../chunk_1650_1669 -> (1650, 1669)
         name = cdir.rstrip("/").split("/")[-1]
         lo, hi = name.split("_")[-2:]
         return int(lo), int(hi)
@@ -79,19 +81,19 @@ class ShardedBatchStream(IterableDataset):
 
     def _read_chunk(self, paths: list[str]) -> pa.Table:
         if self.file_format == "feather":
-            assert len(paths) == 1
+            assert len(paths) == 1, "feather 每块单文件写入，paths 应为长度 1"
             return ft.read_table(paths[0], columns=self.read_cols, memory_map=True)
         return pq.read_table(paths, columns=self.read_cols, memory_map=True)
 
     def __iter__(self):
-        import random
-        from collections import deque
         from torch.utils.data import DataLoader
 
         rng = random.Random(self.seed)
         chunk_dirs = self.chunk_dirs[:]
+
         wi = get_worker_info()
         if wi is not None:
+            # 多 worker：按 worker_id 切分块，避免重复
             chunk_dirs = chunk_dirs[wi.id::wi.num_workers]
 
         buf = deque(maxlen=max(1, self.buf_n))
@@ -102,10 +104,10 @@ class ShardedBatchStream(IterableDataset):
             if not paths:
                 continue
 
-            # 只读一次到内存
+            # 只读一次到内存（Arrow Table）
             table = self._read_chunk(paths)
 
-            # 行级过滤（必须先有 g_date 列，已在 read_cols 中确保）
+            # 行级过滤（train 期间）
             if self.train_period is not None:
                 lo_tr, hi_tr = self.train_period
                 d = table[self.g_date].to_numpy()
@@ -114,24 +116,31 @@ class ShardedBatchStream(IterableDataset):
                     continue
                 table = table.filter(pa.array(mask))
 
-            # 转 pandas，并做排序 & 类型
+            # 转 pandas（一次），排序 & 类型
             pdf = table.to_pandas()
             if pdf.empty:
                 continue
             pdf[self.g_sym] = pdf[self.g_sym].astype("str")
             pdf.sort_values([self.g_sym, "time_idx"], inplace=True)
 
-            # 可选：训练真正用的列（丢掉 g_date 等只为过滤而读的列）
+            # 训练真正用的列（丢掉仅过滤所需列）
             if self.cols is not None:
                 pdf = pdf[self.cols]
 
             if (i % self.print_every_chunks) == 0 and (wi is None or wi.id == 0):
                 print(f"[loader] chunk {i}/{total}: {cdir} -> rows={len(pdf):,}")
 
-            # 在内存里构建 tsds，并一次性建 dataloader（⚠️ 不要在每个 batch 重建）
+            # 在内存里构建 TSDS，并一次性建内层 DataLoader（并行打包/切窗）
             tsds = TimeSeriesDataSet.from_dataset(self.template, data=pdf, stop_randomization=False)
-            dl = tsds.to_dataloader(train=True, batch_size=self.bs, num_workers=0,
-                                    shuffle=False, pin_memory=True)
+            dl = tsds.to_dataloader(
+                train=True,
+                batch_size=self.bs,
+                num_workers=0,
+                persistent_workers=False,   # 每个 chunk 生命周期短
+                prefetch_factor=None,
+                shuffle=False,
+                pin_memory=True,
+            )
 
             if self.buf_n <= 1:
                 for b in dl:
