@@ -22,8 +22,10 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, Learning
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import DeviceStatsMonitor
 from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
-from pytorch_forecasting.metrics import MAE
+from pytorch_forecasting.metrics import MAE, RMSE
 from pytorch_forecasting.data.encoders import NaNLabelEncoder
+from pytorch_forecasting.data import TorchNormalizer
+
 
 # 你的工程工具
 from pipeline.io import cfg, P, fs, storage_options, ensure_dir_local
@@ -92,6 +94,20 @@ class SamplesPerSec(L.Callback):
             self._step0 = trainer.global_step
             self._count = 0
 
+from lightning.pytorch.callbacks import TQDMProgressBar
+
+class ShowKeysProgressBar(TQDMProgressBar):
+    def get_metrics(self, trainer, pl_module):
+        items = super().get_metrics(trainer, pl_module)
+        want = ["val_WR2"]
+        for k in want:
+            v = trainer.callback_metrics.get(k, None)
+            if v is not None:
+                try:
+                    items[k] = f"{float(v):.4f}"
+                except Exception:
+                    items[k] = str(v)
+        return items
 
 
 
@@ -135,18 +151,18 @@ def main():
     RAW_FEATURES = BASIC_FEATURES
 
     # 训练 & CV 超参
-    N_SPLITS     = 2
+    N_SPLITS     = 1
     GAP_DAYS     = 5
     TRAIN_TO_VAL = 4
-    ENC_LEN      = 90
+    ENC_LEN      = 30
     DEC_LEN      = 1
     PRED_LEN     = DEC_LEN
-    BATCH_SIZE   = 256         
+    BATCH_SIZE   = 1024    
     LR           = 1e-3
     HIDDEN       = 16
     HEADS        = 1
     DROPOUT      = 0.1
-    MAX_EPOCHS   = 20
+    MAX_EPOCHS   = 3
     CHUNK_DAYS   = 20
 
     # 数据路径
@@ -165,7 +181,7 @@ def main():
     data_paths = fs.glob(f"{PANEL_DIR_AZ}/*.parquet")
     data_paths = [p if p.startswith("az://") else f"az://{p}" for p in data_paths]
     lf_data = pl.scan_parquet(data_paths, storage_options=storage_options)
-    lf_data = lf_data.filter(pl.col(G_DATE).is_between(1610, 1690, closed="both"))
+    lf_data = lf_data.filter(pl.col(G_DATE).is_between(1610, 1670, closed="both"))
 
     lf_grid = (
         lf_data.select([G_DATE, G_TIME]).unique()
@@ -286,10 +302,10 @@ def main():
         # Feather 懒加载
         pdf_tmpl = (
             pl.scan_ipc(all_paths)
-              .filter(pl.col(G_DATE).is_in(tmpl_days))
-              .select(TRAIN_COLS)
-              .collect(streaming=True)
-              .to_pandas()
+            .filter(pl.col(G_DATE).is_in(tmpl_days))
+            .select(TRAIN_COLS)
+            .collect(streaming=True)
+            .to_pandas()
         )
         pdf_tmpl[G_SYM] = pdf_tmpl[G_SYM].astype("str")
         pdf_tmpl.sort_values([G_SYM, "time_idx"], inplace=True)
@@ -363,6 +379,10 @@ def main():
             persistent_workers=False,
             prefetch_factor=2,
         )
+        
+        n_val_batches = len(val_loader)
+        print(f"[debug] val_loader batches = {n_val_batches}")
+        assert n_val_batches > 0, "Empty val dataloader. Check min_prediction_idx/ENC_LEN/date windows."
 
         # 8.5 训练流（Feather + 流式）
         start_date = int(train_days[0])
@@ -376,8 +396,8 @@ def main():
             train_period=train_period,
             g_sym=G_SYM,
             g_date=G_DATE,
-            batch_size=BATCH_SIZE*2,             # 内层真实 batch：建议 512
-            buffer_batches=8,
+            batch_size=BATCH_SIZE*2,             
+            buffer_batches=16,
             seed=42,
             cols=TRAIN_COLS,
             print_every_chunks=1,
@@ -386,9 +406,9 @@ def main():
         train_loader = DataLoader(
             train_stream,
             batch_size=None,
-            num_workers=4,
+            num_workers=14,
             persistent_workers=True,    # 外层 persistent，避免反复 spawn
-            prefetch_factor=4,
+            prefetch_factor=8,
             pin_memory=True,
             multiprocessing_context="spawn",
         )
@@ -398,7 +418,7 @@ def main():
         ckpt_dir_fold.mkdir(parents=True, exist_ok=True)
 
         callbacks = [
-            EarlyStopping(monitor="val_WR2", mode="max", patience=3),
+            EarlyStopping(monitor="val_WR2", mode="max", patience=2, check_on_train_epoch_end=False),
             ModelCheckpoint(
                 monitor="val_WR2",
                 mode="max",
@@ -407,8 +427,9 @@ def main():
                 filename=f"fold{fold_id}-tft-best-{{epoch:02d}}-{{val_WR2:.5f}}",
             ),
             LearningRateMonitor(logging_interval="step"),
-            SamplesPerSec(log_every_n_steps=50),   # ← 记录吞吐
+            SamplesPerSec(log_every_n_steps=200),   # ← 记录吞吐
             DeviceStatsMonitor(),                  # ← 记录 GPU util/mem 曲线
+            ShowKeysProgressBar(),
             
         ]
         RUN_NAME = (
@@ -439,7 +460,8 @@ def main():
             callbacks=callbacks,
             logger=logger,
             default_root_dir=CKPTS_DIR.as_posix(),
-            #limit_train_batches=10,   # 先快速验证吞吐；确认后可去掉
+            val_check_interval=1.0,
+            #limit_train_batches=1000,   # 先快速验证吞吐；确认后可去掉
             # profiler="simple",        # 如需定位瓶颈，打开
         )
 
@@ -448,7 +470,7 @@ def main():
         # 8.7 模型并训练
         tft = TemporalFusionTransformer.from_dataset(
             template,
-            loss=MAE(),
+            loss=RMSE(),
             logging_metrics=[WR2()],
             learning_rate=LR,
             hidden_size=HIDDEN,
@@ -456,7 +478,6 @@ def main():
             dropout=DROPOUT,
             reduce_on_plateau_patience=4,
         )
-
         trainer.fit(tft, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
         # 8.8 结果
