@@ -4,7 +4,7 @@ from torch.nn.utils import rnn
 from pytorch_forecasting.metrics import MultiHorizonMetric
 from pytorch_forecasting.utils import unpack_sequence, create_mask
 
-class WeightedR2(MultiHorizonMetric):
+class WR2(MultiHorizonMetric):
     """
     Zero-mean Weighted R^2 for decoder horizon:
         WR2 = 1 - (Σ w * (y - ŷ)^2) / (Σ w * y^2)

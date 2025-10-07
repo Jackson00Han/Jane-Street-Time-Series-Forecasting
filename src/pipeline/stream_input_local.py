@@ -45,27 +45,6 @@ class ShardedBatchStream(IterableDataset):
 
         print(f"[ShardedBatchStream] 使用的chunk: {self.chunk_dirs}")
 
-    def __len__(self) -> int:
-        # 用 date 列粗估，按 batch_size 折算步数；给 Lightning 进度用
-        try:
-            total_rows = 0
-            for cdir in self.chunk_dirs:
-                paths = self.chunk2paths.get(cdir, [])
-                if not paths:
-                    continue
-                if self.file_format == "feather":
-                    t = ft.read_table(paths[0], columns=[self.g_date], memory_map=True)
-                else:
-                    t = pq.read_table(paths, columns=[self.g_date], memory_map=True)
-                d = t[self.g_date].to_numpy()
-                if self.train_period is not None:
-                    lo, hi = self.train_period
-                    total_rows += int(((d >= lo) & (d <= hi)).sum())
-                else:
-                    total_rows += len(d)
-            return max(1, total_rows // max(1, self.bs))
-        except Exception:
-            return 1
 
     @staticmethod
     def _parse_chunk_span(cdir: str):

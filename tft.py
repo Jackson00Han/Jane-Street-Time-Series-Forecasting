@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.loggers import TensorBoardLogger
-
+from lightning.pytorch.callbacks import DeviceStatsMonitor
 from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
 from pytorch_forecasting.metrics import MAE
 from pytorch_forecasting.data.encoders import NaNLabelEncoder
@@ -28,7 +28,7 @@ from pytorch_forecasting.data.encoders import NaNLabelEncoder
 # 你的工程工具
 from pipeline.io import cfg, P, fs, storage_options, ensure_dir_local
 from pipeline.stream_input_local import ShardedBatchStream  # 使用下方给你的新版类
-from pipeline.wr2 import WeightedR2
+from pipeline.wr2 import WR2
 
 # ---- 性能/兼容开关（仅一次）----
 os.environ.setdefault("POLARS_MAX_THREADS", str(max(1, os.cpu_count() // 2)))
@@ -40,6 +40,59 @@ torch.set_float32_matmul_precision("high")
 def _now() -> str:
     import time as _t
     return _t.strftime("%Y-%m-%d %H:%M:%S")
+
+import time, torch, lightning as L
+
+def _infer_bsz(batch):
+    if isinstance(batch, dict):
+        for v in batch.values():
+            if torch.is_tensor(v) and v.dim() > 0:
+                return v.size(0)
+    if isinstance(batch, (list, tuple)) and batch:
+        return _infer_bsz(batch[0])
+    return None
+
+class SamplesPerSec(L.Callback):
+    def __init__(self, log_every_n_steps=50, ema=0.9):
+        self.log_every = log_every_n_steps
+        self.ema = ema
+        self._t0 = None
+        self._step0 = None
+        self._count = 0
+        self._ema_sps = None
+
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+        if self._t0 is None:
+            self._t0 = time.perf_counter()
+            self._step0 = trainer.global_step
+
+        bsz = _infer_bsz(batch) or 0
+        world = getattr(trainer, "world_size", 1) or 1
+        self._count += bsz * world
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        # 每 log_every 步记录一次
+        if (trainer.global_step - self._step0) >= self.log_every:
+            now = time.perf_counter()
+            dt = max(1e-6, now - self._t0)
+            sps = self._count / dt
+            its = (trainer.global_step - self._step0) / dt
+
+            # EMA 平滑
+            self._ema_sps = sps if self._ema_sps is None else self.ema*self._ema_sps + (1-self.ema)*sps
+
+            trainer.logger.log_metrics({
+                "train/samples_per_sec": sps,
+                "train/samples_per_sec_ema": self._ema_sps,
+                "train/it_per_sec": its,
+            }, step=trainer.global_step)
+
+            # 窗口复位
+            self._t0 = now
+            self._step0 = trainer.global_step
+            self._count = 0
+
+
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -83,12 +136,12 @@ def main():
 
     # 训练 & CV 超参
     N_SPLITS     = 2
-    GAP_DAYS     = 7
+    GAP_DAYS     = 5
     TRAIN_TO_VAL = 4
-    ENC_LEN      = 512
+    ENC_LEN      = 90
     DEC_LEN      = 1
     PRED_LEN     = DEC_LEN
-    BATCH_SIZE   = 256          # 外层 run_name 用；真正 train 用 512 在下方
+    BATCH_SIZE   = 256         
     LR           = 1e-3
     HIDDEN       = 16
     HEADS        = 1
@@ -112,7 +165,7 @@ def main():
     data_paths = fs.glob(f"{PANEL_DIR_AZ}/*.parquet")
     data_paths = [p if p.startswith("az://") else f"az://{p}" for p in data_paths]
     lf_data = pl.scan_parquet(data_paths, storage_options=storage_options)
-    lf_data = lf_data.filter(pl.col(G_DATE).is_between(1610, 1680, closed="both"))
+    lf_data = lf_data.filter(pl.col(G_DATE).is_between(1610, 1690, closed="both"))
 
     lf_grid = (
         lf_data.select([G_DATE, G_TIME]).unique()
@@ -227,7 +280,7 @@ def main():
 
         # 8.1 Template（用训练起始前 N 天固化编码/缩放配置）
         days_sorted = np.sort(train_days)
-        TEMPLATE_DAYS = min(5, len(days_sorted))
+        TEMPLATE_DAYS = min(3, len(days_sorted))
         tmpl_days = list(map(int, days_sorted[:TEMPLATE_DAYS]))
 
         # Feather 懒加载
@@ -242,19 +295,8 @@ def main():
         pdf_tmpl.sort_values([G_SYM, "time_idx"], inplace=True)
         print(f"[fold {fold_id}] template days={tmpl_days}, template shape={pdf_tmpl.shape}")
 
-        # 8.2 验证集
-        pdf_val = (
-            pl.scan_ipc(all_paths)
-              .filter(pl.col(G_DATE).is_in(list(map(int, val_days))))
-              .select(TRAIN_COLS)
-              .collect(streaming=True)
-              .to_pandas()
-        )
-        pdf_val[G_SYM] = pdf_val[G_SYM].astype("str")
-        pdf_val.sort_values([G_SYM, "time_idx"], inplace=True)
-        print(f"template {pdf_tmpl.shape}, val {pdf_val.shape}")
 
-        # 8.3 TimeSeries 模板（known/unknown 正确配置）
+        # 8.2 TimeSeries 模板（known/unknown 正确配置）
         identity_scalers = {name: None for name in (KNOWN_REALS + UNKNOWN_REALS)}
         template = TimeSeriesDataSet(
             pdf_tmpl,
@@ -262,8 +304,10 @@ def main():
             target=TARGET_COL,
             group_ids=[G_SYM],
             weight=WEIGHT_COL,
-            max_encoder_length=ENC_LEN, min_encoder_length=ENC_LEN,
-            max_prediction_length=PRED_LEN, min_prediction_length=PRED_LEN,
+            max_encoder_length=ENC_LEN, 
+            min_encoder_length=ENC_LEN,
+            max_prediction_length=PRED_LEN, 
+            min_prediction_length=PRED_LEN,
             static_categoricals=[G_SYM],
             time_varying_known_reals=KNOWN_REALS,
             time_varying_unknown_reals=UNKNOWN_REALS,
@@ -277,11 +321,43 @@ def main():
             scalers=identity_scalers,
         )
 
+
+        # 8.3 验证集
+        
+        val_lo,val_hi = int(val_days[0]), int(val_days[-1])
+        need_days = int(np.ceil((ENC_LEN + 100) / 968))
+        extra_days = max(need_days, 2)  # 至少多取2天，保证连续
+        cut_lo = val_lo - extra_days # 往前推2天，保证 encoder context 连续
+        
+        
+        pdf_val = (
+            pl.scan_ipc(all_paths)
+            .filter(pl.col(G_DATE).is_between(cut_lo, val_hi, closed="both"))
+            .collect(streaming=True)
+            .to_pandas()
+        )
+        pdf_val[G_SYM] = pdf_val[G_SYM].astype("str")
+        pdf_val.sort_values([G_SYM, "time_idx"], inplace=True)
+        
+        val_start_idx = pdf_val.loc[pdf_val[G_DATE] == val_lo, "time_idx"].min()
+        assert pd.notna(val_start_idx), f"No rows found for val_lo={val_lo}"
+        val_start_idx = int(val_start_idx)
+
+        pdf_val = pdf_val[TRAIN_COLS]
+        print(f"validation set get previous {extra_days} days, from {cut_lo} to {val_hi}, "
+            f"shape={pdf_val.shape}, val_start_idx={val_start_idx}")
+        
         # 8.4 验证 Loader
-        validation = TimeSeriesDataSet.from_dataset(template, data=pdf_val, stop_randomization=True)
+        validation = TimeSeriesDataSet.from_dataset(
+            template, 
+            data=pdf_val, 
+            stop_randomization=True,
+            min_prediction_idx=val_start_idx
+        )
+        
         val_loader = validation.to_dataloader(
             train=False,
-            batch_size=512,
+            batch_size=BATCH_SIZE,
             num_workers=2,
             pin_memory=True,
             persistent_workers=False,
@@ -300,7 +376,7 @@ def main():
             train_period=train_period,
             g_sym=G_SYM,
             g_date=G_DATE,
-            batch_size=512,             # 内层真实 batch：建议 512
+            batch_size=BATCH_SIZE*2,             # 内层真实 batch：建议 512
             buffer_batches=8,
             seed=42,
             cols=TRAIN_COLS,
@@ -322,15 +398,18 @@ def main():
         ckpt_dir_fold.mkdir(parents=True, exist_ok=True)
 
         callbacks = [
-            EarlyStopping(monitor="val_WeightedR2", mode="max", patience=3),
+            EarlyStopping(monitor="val_WR2", mode="max", patience=3),
             ModelCheckpoint(
-                monitor="val_WeightedR2",
+                monitor="val_WR2",
                 mode="max",
                 save_top_k=1,
                 dirpath=ckpt_dir_fold.as_posix(),
-                filename=f"fold{fold_id}-tft-best-{{epoch:02d}}-{{val_WeightedR2:.5f}}",
+                filename=f"fold{fold_id}-tft-best-{{epoch:02d}}-{{val_WR2:.5f}}",
             ),
             LearningRateMonitor(logging_interval="step"),
+            SamplesPerSec(log_every_n_steps=50),   # ← 记录吞吐
+            DeviceStatsMonitor(),                  # ← 记录 GPU util/mem 曲线
+            
         ]
         RUN_NAME = (
             f"f{fold_id}"
@@ -354,13 +433,13 @@ def main():
             max_epochs=MAX_EPOCHS,
             num_sanity_val_steps=0,
             gradient_clip_val=0.5,
-            log_every_n_steps=200,
+            log_every_n_steps=100,
             enable_progress_bar=True,
             enable_model_summary=False,
             callbacks=callbacks,
             logger=logger,
             default_root_dir=CKPTS_DIR.as_posix(),
-            limit_train_batches=1000,   # 先快速验证吞吐；确认后可去掉
+            #limit_train_batches=10,   # 先快速验证吞吐；确认后可去掉
             # profiler="simple",        # 如需定位瓶颈，打开
         )
 
@@ -370,7 +449,7 @@ def main():
         tft = TemporalFusionTransformer.from_dataset(
             template,
             loss=MAE(),
-            logging_metrics=[WeightedR2()],
+            logging_metrics=[WR2()],
             learning_rate=LR,
             hidden_size=HIDDEN,
             attention_head_size=HEADS,
