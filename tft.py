@@ -147,23 +147,57 @@ def main():
     TIME_FEATURES = ["time_pos", "time_sin", "time_cos", "time_bucket"]
 
     # 连续特征（示例）
-    BASIC_FEATURES = ["feature_36", "feature_06", "feature_04", "feature_16", "feature_69", "feature_22"]
-    RAW_FEATURES = BASIC_FEATURES
+    BASIC_FEATURES = ["feature_36", 
+                    "feature_06", 
+                    "feature_04", 
+                    "feature_16", 
+                    "feature_69", 
+                    "feature_22",
+                    "feature_20", 
+                    "feature_58", 
+                    "feature_24", 
+                    "feature_27",
+                    "feature_37"]
+    ADDED_COLS = ["feature_08__ewm5", 
+                "responder_5_prevday_std", 
+                "responder_3_prevday_std", 
+                "responder_4_prev_tail_d1", 
+                "feature_53__rstd3", 
+                "feature_16__ewm5", 
+                "feature_01__ewm5", 
+                "responder_7_prevday_std", 
+                "responder_8_prevday_mean", 
+                "feature_38__ewm5", 
+                "feature_05__ewm5", 
+                "responder_1_close_roll3_std",
+                "responder_3_prevday_mean",
+                "feature_37__ewm5",
+                "responder_4_prevday_std",
+                "responder_3_prev_tail_d1",
+                "responder_6_prevday_std",
+                "responder_2_prevday_mean",
+                "responder_0_prevday_std",
+                "responder_3_prev2day_close",
+                "responder_8_prevday_std",
+                "responder_2_prev_tail_d1",
+                "responder_4_prevday_mean"
+            ]
+    RAW_FEATURES = BASIC_FEATURES + ADDED_COLS
 
     # 训练 & CV 超参
     N_SPLITS     = 1
-    GAP_DAYS     = 5
-    TRAIN_TO_VAL = 4
-    ENC_LEN      = 30
+    GAP_DAYS     = 7
+    TRAIN_TO_VAL = 5
+    ENC_LEN      = 50
     DEC_LEN      = 1
     PRED_LEN     = DEC_LEN
-    BATCH_SIZE   = 1024    
+    BATCH_SIZE   = 512   
     LR           = 1e-3
     HIDDEN       = 16
     HEADS        = 1
     DROPOUT      = 0.1
-    MAX_EPOCHS   = 3
-    CHUNK_DAYS   = 20
+    MAX_EPOCHS   = 20
+    CHUNK_DAYS   = 30
 
     # 数据路径
     PANEL_DIR_AZ   = P("az", cfg["paths"].get("panel_shards", "panel_shards"))
@@ -181,7 +215,7 @@ def main():
     data_paths = fs.glob(f"{PANEL_DIR_AZ}/*.parquet")
     data_paths = [p if p.startswith("az://") else f"az://{p}" for p in data_paths]
     lf_data = pl.scan_parquet(data_paths, storage_options=storage_options)
-    lf_data = lf_data.filter(pl.col(G_DATE).is_between(1610, 1670, closed="both"))
+    lf_data = lf_data.filter(pl.col(G_DATE).is_between(1610, 1690, closed="both"))
 
     lf_grid = (
         lf_data.select([G_DATE, G_TIME]).unique()
@@ -220,15 +254,15 @@ def main():
 
     lf_clean = (
         lf0.with_columns(inf2null_exprs)
-           .with_columns(isna_flag_exprs)
-           .with_columns(ffill_exprs)
+        .with_columns(isna_flag_exprs)
+        .with_columns(ffill_exprs)
     )
 
     lf_stats_sym = (
         lf_clean.filter(pl.col(G_DATE) <= stats_hi)
                 .group_by(G_SYM)
                 .agg([pl.col(c).mean().alias(f"mu_{c}") for c in RAW_FEATURES] +
-                     [pl.col(c).std(ddof=0).alias(f"std_{c}") for c in RAW_FEATURES])
+                    [pl.col(c).std(ddof=0).alias(f"std_{c}") for c in RAW_FEATURES])
     )
     lf_stats_glb = (
         lf_clean.filter(pl.col(G_DATE) <= stats_hi)
@@ -292,7 +326,7 @@ def main():
 
     for fold_id, (train_days, val_days) in enumerate(folds_by_day, start=1):
         print(f"[fold {fold_id}] train {train_days[0]}..{train_days[-1]} ({len(train_days)} days), "
-              f"val {val_days[0]}..{val_days[-1]} ({len(val_days)} days)")
+            f"val {val_days[0]}..{val_days[-1]} ({len(val_days)} days)")
 
         # 8.1 Template（用训练起始前 N 天固化编码/缩放配置）
         days_sorted = np.sort(train_days)
@@ -337,14 +371,12 @@ def main():
             scalers=identity_scalers,
         )
 
-
         # 8.3 验证集
         
         val_lo,val_hi = int(val_days[0]), int(val_days[-1])
         need_days = int(np.ceil((ENC_LEN + 100) / 968))
         extra_days = max(need_days, 2)  # 至少多取2天，保证连续
         cut_lo = val_lo - extra_days # 往前推2天，保证 encoder context 连续
-        
         
         pdf_val = (
             pl.scan_ipc(all_paths)
@@ -400,7 +432,7 @@ def main():
             buffer_batches=16,
             seed=42,
             cols=TRAIN_COLS,
-            print_every_chunks=1,
+            print_every_chunks=0,
             file_format="feather",      # 关键
         )
         train_loader = DataLoader(
@@ -418,13 +450,19 @@ def main():
         ckpt_dir_fold.mkdir(parents=True, exist_ok=True)
 
         callbacks = [
-            EarlyStopping(monitor="val_WR2", mode="max", patience=2, check_on_train_epoch_end=False),
+            EarlyStopping(
+                monitor="val_WR2", 
+                mode="max", 
+                patience=3, 
+                check_on_train_epoch_end=False
+            ),
             ModelCheckpoint(
                 monitor="val_WR2",
                 mode="max",
                 save_top_k=1,
                 dirpath=ckpt_dir_fold.as_posix(),
                 filename=f"fold{fold_id}-tft-best-{{epoch:02d}}-{{val_WR2:.5f}}",
+                save_on_train_epoch_end=False
             ),
             LearningRateMonitor(logging_interval="step"),
             SamplesPerSec(log_every_n_steps=200),   # ← 记录吞吐
@@ -452,16 +490,16 @@ def main():
         trainer = L.Trainer(
             accelerator="gpu", devices=1, precision="bf16-mixed",
             max_epochs=MAX_EPOCHS,
+            check_val_every_n_epoch=1,
             num_sanity_val_steps=0,
             gradient_clip_val=0.5,
-            log_every_n_steps=100,
+            log_every_n_steps=200,
             enable_progress_bar=True,
             enable_model_summary=False,
             callbacks=callbacks,
             logger=logger,
             default_root_dir=CKPTS_DIR.as_posix(),
-            val_check_interval=1.0,
-            #limit_train_batches=1000,   # 先快速验证吞吐；确认后可去掉
+            #limit_train_batches=100,   # 先快速验证吞吐；确认后可去掉
             # profiler="simple",        # 如需定位瓶颈，打开
         )
 
@@ -495,7 +533,6 @@ def main():
         print(f"[CV] mean val_wr2 = {cv_wr2:.6f}")
 
     print("[done] best_ckpts =", best_ckpt_paths)
-
 
 if __name__ == "__main__":
     main()

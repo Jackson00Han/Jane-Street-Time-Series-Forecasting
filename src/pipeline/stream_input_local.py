@@ -106,8 +106,11 @@ class ShardedBatchStream(IterableDataset):
             if self.cols is not None:
                 pdf = pdf[self.cols]
 
-            if (i % self.print_every_chunks) == 0 and (wi is None or wi.id == 0):
-                print(f"[loader] chunk {i}/{total}: {cdir} -> rows={len(pdf):,}")
+            if (self.print_every_chunks is not None 
+                and self.print_every_chunks > 0 
+                and (i % self.print_every_chunks) == 0
+                and (wi is None or wi.id == 0)):
+                print(f"[loader] chunk {i+1}/{n}: {path} -> rows={rows}")
 
             # 在内存里构建 TSDS，并一次性建内层 DataLoader（并行打包/切窗）
             tsds = TimeSeriesDataSet.from_dataset(self.template, data=pdf, stop_randomization=False)
