@@ -16,12 +16,13 @@ import polars as pl
 import torch
 import torch.backends.cudnn as cudnn
 import lightning as L
+import lightning.pytorch as lp
 from torch.utils.data import DataLoader
 
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import DeviceStatsMonitor
-from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
+from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer, Baseline
 from pytorch_forecasting.metrics import MAE, RMSE
 from pytorch_forecasting.data.encoders import NaNLabelEncoder
 from pytorch_forecasting.data import TorchNormalizer
@@ -42,73 +43,6 @@ torch.set_float32_matmul_precision("high")
 def _now() -> str:
     import time as _t
     return _t.strftime("%Y-%m-%d %H:%M:%S")
-
-import time, torch, lightning as L
-
-def _infer_bsz(batch):
-    if isinstance(batch, dict):
-        for v in batch.values():
-            if torch.is_tensor(v) and v.dim() > 0:
-                return v.size(0)
-    if isinstance(batch, (list, tuple)) and batch:
-        return _infer_bsz(batch[0])
-    return None
-
-class SamplesPerSec(L.Callback):
-    def __init__(self, log_every_n_steps=50, ema=0.9):
-        self.log_every = log_every_n_steps
-        self.ema = ema
-        self._t0 = None
-        self._step0 = None
-        self._count = 0
-        self._ema_sps = None
-
-    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
-        if self._t0 is None:
-            self._t0 = time.perf_counter()
-            self._step0 = trainer.global_step
-
-        bsz = _infer_bsz(batch) or 0
-        world = getattr(trainer, "world_size", 1) or 1
-        self._count += bsz * world
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        # 每 log_every 步记录一次
-        if (trainer.global_step - self._step0) >= self.log_every:
-            now = time.perf_counter()
-            dt = max(1e-6, now - self._t0)
-            sps = self._count / dt
-            its = (trainer.global_step - self._step0) / dt
-
-            # EMA 平滑
-            self._ema_sps = sps if self._ema_sps is None else self.ema*self._ema_sps + (1-self.ema)*sps
-
-            trainer.logger.log_metrics({
-                "train/samples_per_sec": sps,
-                "train/samples_per_sec_ema": self._ema_sps,
-                "train/it_per_sec": its,
-            }, step=trainer.global_step)
-
-            # 窗口复位
-            self._t0 = now
-            self._step0 = trainer.global_step
-            self._count = 0
-
-from lightning.pytorch.callbacks import TQDMProgressBar
-
-class ShowKeysProgressBar(TQDMProgressBar):
-    def get_metrics(self, trainer, pl_module):
-        items = super().get_metrics(trainer, pl_module)
-        want = ["val_WR2"]
-        for k in want:
-            v = trainer.callback_metrics.get(k, None)
-            if v is not None:
-                try:
-                    items[k] = f"{float(v):.4f}"
-                except Exception:
-                    items[k] = str(v)
-        return items
-
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -158,31 +92,8 @@ def main():
                     "feature_24", 
                     "feature_27",
                     "feature_37"]
-    ADDED_COLS = ["feature_08__ewm5", 
-                "responder_5_prevday_std", 
-                "responder_3_prevday_std", 
-                "responder_4_prev_tail_d1", 
-                "feature_53__rstd3", 
-                "feature_16__ewm5", 
-                "feature_01__ewm5", 
-                "responder_7_prevday_std", 
-                "responder_8_prevday_mean", 
-                "feature_38__ewm5", 
-                "feature_05__ewm5", 
-                "responder_1_close_roll3_std",
-                "responder_3_prevday_mean",
-                "feature_37__ewm5",
-                "responder_4_prevday_std",
-                "responder_3_prev_tail_d1",
-                "responder_6_prevday_std",
-                "responder_2_prevday_mean",
-                "responder_0_prevday_std",
-                "responder_3_prev2day_close",
-                "responder_8_prevday_std",
-                "responder_2_prev_tail_d1",
-                "responder_4_prevday_mean"
-            ]
-    RAW_FEATURES = BASIC_FEATURES #+ ADDED_COLS
+
+    RAW_FEATURES = BASIC_FEATURES 
 
     # 训练 & CV 超参
     N_SPLITS     = 1
@@ -304,22 +215,11 @@ def main():
         print(f"[{_now()}] chunk {ci}/{len(day_chunks)} -> days {chunk[0]}..{chunk[-1]} written (local)")
 
     # ========== 6) 归并 chunk → 路径清单（Feather） ==========
-    chunk_dirs = sorted(p.as_posix() for p in Path(LOCAL_CLEAN_DIR).glob("chunk_*") if p.is_dir())
-
-    chunk2paths: dict[str, list[str]] = {}
-    for cdir in chunk_dirs:
-        paths = sorted(p.as_posix() for p in Path(cdir).glob("*.feather"))
-        if not paths:
-            print(f"[WARN] empty chunk: {cdir}")
-        chunk2paths[cdir] = paths
-
-    all_paths = [p for plist in chunk2paths.values() for p in plist]
-    print(f"[prep] {len(chunk_dirs)} local chunks; {len(all_paths)} files total")
-
+    all_paths = sorted(p.as_posix() for p in Path(LOCAL_CLEAN_DIR).glob("chunk_*") if p.is_dir())
+    
     # ========== 7) 训练列（known/unknown 分开） ==========
-    KNOWN_REALS   = TIME_FEATURES
-    UNKNOWN_REALS = Z_COLS + NAMARK_COLS
-    TRAIN_COLS    = [G_SYM, "time_idx", WEIGHT_COL, TARGET_COL, *KNOWN_REALS, *UNKNOWN_REALS]
+    UNKNOWN_REALS = TIME_FEATURES + Z_COLS + NAMARK_COLS
+    TRAIN_COLS    = [G_SYM, "time_idx", WEIGHT_COL, TARGET_COL, *UNKNOWN_REALS]
 
     # ========== 8) 训练（按 CV 折） ==========
     best_ckpt_paths, fold_metrics = [], []
@@ -327,29 +227,39 @@ def main():
     for fold_id, (train_days, val_days) in enumerate(folds_by_day, start=1):
         print(f"[fold {fold_id}] train {train_days[0]}..{train_days[-1]} ({len(train_days)} days), "
             f"val {val_days[0]}..{val_days[-1]} ({len(val_days)} days)")
-
-        # 8.1 Template（用训练起始前 N 天固化编码/缩放配置）
-        days_sorted = np.sort(train_days)
-        TEMPLATE_DAYS = min(3, len(days_sorted))
-        tmpl_days = list(map(int, days_sorted[:TEMPLATE_DAYS]))
-
-        # Feather 懒加载
-        pdf_tmpl = (
+        
+        # 明确日期：
+        train_start_date = int(train_days[0])
+        train_end_date   = int(train_days[-1])
+        val_start_date   = int(val_days[0])
+        val_end_date     = int(val_days[-1])      
+        
+        # 提取数据
+        date_range = (train_start_date, val_end_date)
+        pdf_data = (
             pl.scan_ipc(all_paths)
-            .filter(pl.col(G_DATE).is_in(tmpl_days))
-            .select(TRAIN_COLS)
+            .filter(pl.col(G_DATE).is_between(train_start_date, val_end_date, closed="both"))
             .collect(streaming=True)
             .to_pandas()
         )
-        pdf_tmpl[G_SYM] = pdf_tmpl[G_SYM].astype("str")
-        pdf_tmpl.sort_values([G_SYM, "time_idx"], inplace=True)
-        print(f"[fold {fold_id}] template days={tmpl_days}, template shape={pdf_tmpl.shape}")
-
-
-        # 8.2 TimeSeries 模板（known/unknown 正确配置）
-        identity_scalers = {name: None for name in (KNOWN_REALS + UNKNOWN_REALS)}
-        template = TimeSeriesDataSet(
-            pdf_tmpl,
+        
+        pdf_data[G_SYM] = pdf_data[G_SYM].astype("str")
+        pdf_data.sort_values([G_SYM, "time_idx"], inplace=True)        
+        # 明确 indexes:
+        train_end_idx = pdf_data.loc[pdf_data[G_DATE] == train_end_date, "time_idx"].max()
+        val_start_idx = pdf_data.loc[pdf_data[G_DATE] == val_start_date, "time_idx"].min()
+        val_end_idx   = pdf_data.loc[pdf_data[G_DATE] == val_end_date, "time_idx"].max()
+        assert pd.notna(train_end_idx) and pd.notna(val_start_idx) and pd.notna(val_end_idx), "train/val idx not found"
+        train_end_idx, val_start_idx, val_end_idx = int(train_end_idx), int(val_start_idx), int(val_end_idx)
+        print(f"[fold {fold_id}] train idx up to {train_end_idx}, val idx {val_start_idx}..{val_end_idx}")  
+        
+        pdf_data = pdf_data[TRAIN_COLS].copy()
+    
+        # 构建训练集 timeseries dataset
+        identity_scalers = {name: None for name in (UNKNOWN_REALS)}
+        
+        base_ds = TimeSeriesDataSet(
+            pdf_data,
             time_idx="time_idx",
             target=TARGET_COL,
             group_ids=[G_SYM],
@@ -358,9 +268,11 @@ def main():
             min_encoder_length=ENC_LEN,
             max_prediction_length=PRED_LEN, 
             min_prediction_length=PRED_LEN,
+            
             static_categoricals=[G_SYM],
-            time_varying_known_reals=KNOWN_REALS,
+            
             time_varying_unknown_reals=UNKNOWN_REALS,
+            
             lags=None,
             categorical_encoders={G_SYM: NaNLabelEncoder(add_nan=True)},
             add_relative_time_idx=False,
@@ -370,169 +282,97 @@ def main():
             target_normalizer=None,
             scalers=identity_scalers,
         )
-
-        # 8.3 验证集
         
-        val_lo,val_hi = int(val_days[0]), int(val_days[-1])
-        need_days = int(np.ceil((ENC_LEN + 100) / 968))
-        extra_days = max(need_days, 2)  # 至少多取2天，保证连续
-        cut_lo = val_lo - extra_days # 往前推2天，保证 encoder context 连续
-        
-        pdf_val = (
-            pl.scan_ipc(all_paths)
-            .filter(pl.col(G_DATE).is_between(cut_lo, val_hi, closed="both"))
-            .collect(streaming=True)
-            .to_pandas()
-        )
-        pdf_val[G_SYM] = pdf_val[G_SYM].astype("str")
-        pdf_val.sort_values([G_SYM, "time_idx"], inplace=True)
-        
-        val_start_idx = pdf_val.loc[pdf_val[G_DATE] == val_lo, "time_idx"].min()
-        assert pd.notna(val_start_idx), f"No rows found for val_lo={val_lo}"
-        val_start_idx = int(val_start_idx)
-
-        pdf_val = pdf_val[TRAIN_COLS]
-        print(f"validation set get previous {extra_days} days, from {cut_lo} to {val_hi}, "
-            f"shape={pdf_val.shape}, val_start_idx={val_start_idx}")
-        
-        # 8.4 验证 Loader
-        validation = TimeSeriesDataSet.from_dataset(
-            template, 
-            data=pdf_val, 
-            stop_randomization=True,
-            min_prediction_idx=val_start_idx
+        # 划分训练集，验证集
+        train_ds = base_ds.filter(
+            lambda idx: (
+                idx.time_idx_last <= train_end_idx
+            ),
+            copy=True
         )
         
-        val_loader = validation.to_dataloader(
-            train=False,
-            batch_size=BATCH_SIZE,
-            num_workers=2,
+        val_ds = base_ds.filter(
+            lambda idx: (
+                (idx.time_idx_first_prediction >= val_start_idx) &
+                
+                (idx.time_idx_last <= val_end_idx)
+            ),
+            copy=True
+        )
+        
+        # 数据集加载
+        
+        train_loader = train_ds.to_dataloader(
+            train=True, 
+            batch_size=BATCH_SIZE, 
+            num_workers=8,
             pin_memory=True,
             persistent_workers=False,
             prefetch_factor=2,
         )
         
+        n_train_batches = len(train_loader)
+        print(f"[debug] train_loader batches = {n_train_batches}")
+        assert n_train_batches > 0, "Empty train dataloader. Check min_prediction_idx/ENC_LEN/date windows."
+        
+        val_loader = val_ds.to_dataloader(
+            train=False,
+            batch_size=BATCH_SIZE,
+            num_workers=8,
+            pin_memory=True,
+            persistent_workers=False,
+            prefetch_factor=2,
+        )
+
         n_val_batches = len(val_loader)
         print(f"[debug] val_loader batches = {n_val_batches}")
         assert n_val_batches > 0, "Empty val dataloader. Check min_prediction_idx/ENC_LEN/date windows."
-
-        # 8.5 训练流（Feather + 流式）
-        start_date = int(train_days[0])
-        end_date   = int(train_days[-1])
-        train_period = (start_date, end_date)
-
-        train_stream = ShardedBatchStream(
-            template_tsd=template,
-            chunk_dirs=chunk_dirs,
-            chunk2paths=chunk2paths,
-            train_period=train_period,
-            g_sym=G_SYM,
-            g_date=G_DATE,
-            batch_size=BATCH_SIZE*2,             
-            buffer_batches=16,
-            seed=42,
-            cols=TRAIN_COLS,
-            print_every_chunks=0,
-            file_format="feather",      # 关键
-        )
-        train_loader = DataLoader(
-            train_stream,
-            batch_size=None,
-            num_workers=14,
-            persistent_workers=True,    # 外层 persistent，避免反复 spawn
-            prefetch_factor=8,
-            pin_memory=True,
-            multiprocessing_context="spawn",
-        )
-
-        # 8.6 callbacks/logger/trainer
-        ckpt_dir_fold = Path(CKPTS_DIR) / f"fold_{fold_id}"
-        ckpt_dir_fold.mkdir(parents=True, exist_ok=True)
-
-        callbacks = [
-            EarlyStopping(
-                monitor="val_WR2", 
-                mode="max", 
-                patience=3, 
-                check_on_train_epoch_end=False
-            ),
-            ModelCheckpoint(
-                monitor="val_WR2",
-                mode="max",
-                save_top_k=1,
-                dirpath=ckpt_dir_fold.as_posix(),
-                filename=f"fold{fold_id}-tft-best-{{epoch:02d}}-{{val_WR2:.5f}}",
-                save_on_train_epoch_end=False
-            ),
-            LearningRateMonitor(logging_interval="step"),
-            SamplesPerSec(log_every_n_steps=200),   # ← 记录吞吐
-            DeviceStatsMonitor(),                  # ← 记录 GPU util/mem 曲线
-            #ShowKeysProgressBar(),
-            
-        ]
-        RUN_NAME = (
-            f"f{fold_id}"
-            f"_E{MAX_EPOCHS}"
-            f"_lr{LR}"
-            f"_bs{BATCH_SIZE}"
-            f"_enc{ENC_LEN}_dec{DEC_LEN}"
-            f"_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        )
-        logger = TensorBoardLogger(
-            save_dir=LOGS_DIR.as_posix(),
-            name="tft",
-            version=RUN_NAME,
-            default_hp_metric=False
-        )
-
-        print(f"[run] name={logger.name}  version={logger.version}  log_dir={logger.log_dir}")
-
-        trainer = L.Trainer(
-            accelerator="gpu", devices=1, precision="bf16-mixed",
-            max_epochs=MAX_EPOCHS,
-            check_val_every_n_epoch=1,
-            num_sanity_val_steps=0,
+        
+        # calculate baseline mean absolute error, i.e. predict next value as the last available value from the history
+        baseline_predictions = Baseline().predict(val_loader, return_y=True)
+        rmse = RMSE()(baseline_predictions.output, baseline_predictions.y)
+        print(f"rmse: {rmse}")
+        
+        lp.seed_everything(42)
+        trainer = lp.Trainer(
+            accelerator="gpu",
+            # clipping gradients is a hyperparameter and important to prevent divergance
+            # of the gradient for recurrent neural networks
             gradient_clip_val=0.5,
-            log_every_n_steps=200,
-            enable_progress_bar=True,
-            enable_model_summary=False,
-            callbacks=callbacks,
-            logger=logger,
-            default_root_dir=CKPTS_DIR.as_posix(),
-            #limit_train_batches=100,   # 先快速验证吞吐；确认后可去掉
-            # profiler="simple",        # 如需定位瓶颈，打开
         )
 
-        trainer.logger.log_hyperparams({"run_name": RUN_NAME})
 
-        # 8.7 模型并训练
         tft = TemporalFusionTransformer.from_dataset(
-            template,
-            loss=RMSE(),
-            logging_metrics=[WR2()],
+            train_ds,
+            # not meaningful for finding the learning rate but otherwise very important
             learning_rate=LR,
-            hidden_size=HIDDEN,
+            hidden_size=HIDDEN,  # most important hyperparameter apart from learning rate
+            # number of attention heads. Set to up to 4 for large datasets
             attention_head_size=HEADS,
-            dropout=DROPOUT,
-            reduce_on_plateau_patience=4,
+            dropout=DROPOUT,  # between 0.1 and 0.3 are good values
+            hidden_continuous_size=HIDDEN,  # set to <= hidden_size
+            loss=RMSE(),
+            optimizer=torch.optim.Adam,
+            # reduce learning rate if no improvement in validation loss after x epochs
+            # reduce_on_plateau_patience=1000,
         )
-        trainer.fit(tft, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        print(f"Number of parameters in network: {tft.size() / 1e3:.1f}k")
+            
+        # find optimal learning rate
+        from lightning.pytorch.tuner import Tuner
 
-        # 8.8 结果
-        es_cb, ckpt_cb = callbacks[0], callbacks[1]
-        print("epoch_end_at   :", trainer.current_epoch)
-        print("global_step    :", trainer.global_step)
-        print("val_best_score :", float(ckpt_cb.best_model_score))
-        print("es_stopped_ep  :", getattr(es_cb, "stopped_epoch", None))
-        print("es_wait_count  :", getattr(es_cb, "wait_count", None))
+        res = Tuner(trainer).lr_find(
+            tft,
+            train_dataloaders=train_loader,
+            val_dataloaders=val_loader,
+            max_lr=10.0,
+            min_lr=1e-6,
+        )
 
-        best_ckpt_paths.append(ckpt_cb.best_model_path)
-        fold_metrics.append(float(ckpt_cb.best_model_score))
+        print(f"suggested learning rate: {res.suggestion()}")
+        fig = res.plot(show=True, suggest=True)
+        fig.show()
 
-        cv_wr2 = np.mean(fold_metrics)
-        print(f"[CV] mean val_wr2 = {cv_wr2:.6f}")
-
-    print("[done] best_ckpts =", best_ckpt_paths)
 
 if __name__ == "__main__":
     main()
