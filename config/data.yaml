@@ -85,8 +85,8 @@ dates:
     date_hi: 1600
 
   tune_dates:
-    date_lo: 1500
-    date_hi: 1698
+    date_lo: 1000
+    date_hi: 1600
 
 
 cv:

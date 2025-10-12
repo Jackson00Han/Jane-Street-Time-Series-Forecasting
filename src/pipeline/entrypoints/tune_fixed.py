@@ -143,6 +143,8 @@ def main():
     # 6) 逐折训练与评估（无 Optuna）
     # =========================
     fold_scores, best_iters = [], []
+    
+    
     for k, (tr_idx, va_idx) in enumerate(tqdm(folds, desc="fixed_cv", leave=False), 1):
         assert np.all(np.diff(d_sub[tr_idx]) >= 0), f"train dates not sorted in fold {k}"
         assert np.all(np.diff(d_sub[va_idx]) >= 0), f"val dates not sorted in fold {k}"
@@ -171,20 +173,21 @@ def main():
         it_k  = int(bst.best_iteration)
         fold_scores.append(wr2_k)
         best_iters.append(it_k)
-
+        
         # 释放
         bst.free_dataset(); del dtrain, dvalid, bst
         gc.collect()
-
+    
     mean_wr2 = float(np.mean(fold_scores))
     print(f"[fixed] mean_wr2={mean_wr2:.6f} | per-fold={np.round(fold_scores, 6)}")
+    
 
     # =========================
     # 7) 落盘：固定参数的 CV 结果
     # =========================
     ts = int(time.time())
     tag = f"fixed__mm_{Path(prefix).name}__range{lo}-{hi}__cv{n_splits}-g{gap_days}-r{ratio}__{ts}"
-
+    
     # summary json
     out_path = os.path.join(tune_dir, f"{tag}.json")
     with open(out_path, "w", encoding="utf-8") as f:
