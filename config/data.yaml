@@ -45,8 +45,8 @@ paths:
   tmp:          "tmp"
 
   fs_mm_prefix: "/mnt/data/js/exp/v1/fs_mm/full_sample_v1"
-  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1600-1690__cv2-g2-r4__seed42__top1000__1758551023.txt"            # 特征列表路径
-  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1600-1690__cv2-g2-r4__seed42__top1000__1758551023__range1600-1698"
+  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1300-1500__cv3-g7-r4__seed42__top1000__1760299442.txt"
+  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1300-1500__cv3-g7-r4__seed42__top1000__1760299442__range1000-1600"
 
 # 关键列与目标
 keys: ["symbol_id", "date_id", "time_id"]
@@ -61,42 +61,37 @@ time_bucket: "time_bucket"           # 生成的时间桶列名（与 bucket_siz
 # --------- 数据时间范围与切分 ---------
 dates:
   clean_dates:
-    date_lo: 1500 # 原始数据起点日期
-    date_hi: 1698 # 原始数据终点日期（含）
+    date_lo: 800 # 原始数据起点日期
+    date_hi: 1600 # 原始数据终点日期（含）
 
   fe_dates:
-    date_lo: 1600
-    date_hi: 1698
+    date_lo: 800
+    date_hi: 1600
 
   panel_dates:
-    date_lo: 1600
-    date_hi: 1698
+    date_lo: 800
+    date_hi: 1600
 
   mfs_dates:
-    date_lo: 1600
-    date_hi: 1698
+    date_lo: 1200
+    date_hi: 1600
 
   fs_dates:
-    date_lo: 1600
-    date_hi: 1690
+    date_lo: 1300
+    date_hi: 1500
 
   mtrain_dates:
-    date_lo: 1600
-    date_hi: 1698
+    date_lo: 1000
+    date_hi: 1600
 
   tune_dates:
-    date_lo: 1600
-    date_hi: 1698
-
-# ------tft 专用时间范围------
-  tft_dates:
-    date_lo: 1600
+    date_lo: 1500
     date_hi: 1698
 
 
 cv:
   n_splits: 2
-  gap_days: 2
+  gap_days: 7
   train_to_val: 4
 
 
@@ -141,14 +136,14 @@ feature_eng:
     prev_soft_days: 1
     cast_f32: true
     # 适度的尾部滞后
-    tail_lags: [1] #[1, 10, 50, 100, 500, 900, 950, 967]
-    tail_diffs: [1] #[1, 5, 10, 30]
+    tail_lags: [1, 10, 50, 100, 500, 900, 950, 967]
+    tail_diffs: [1, 5, 10, 30]
     # 日度滚动：短中长三档
-    rolling_windows: [3] #[3, 7, 14, 30]
+    rolling_windows: [3, 7, 14, 30]
 
   B:
     enabled: true
-    lags: [1] #[1,2,3,4,5,6,7,14,21,30]
+    lags: [1,2,3,4,5,6,7,14,21,30]
     is_sorted: false
     cast_f32: true
     stats_rep_cols: null
@@ -163,15 +158,15 @@ feature_eng:
     cast_f32: true
     batch_size: 10
     # 适度的历史派生
-    lags: [1,] #[1, 2, 10, 50, 100, 500, 900, 950, 968, 1936, 2904, 3872, 4840, 5808, 6776, 7744]
-    ret_periods: [3,] #[3, 10, 50]
-    diff_periods: [3,] #[3, 10,  50]
-    rz_windows: [3,] #[3, 7, 14, 30]
-    ewm_spans: [5] #[5, 10, 50]
+    lags: [1, 2, 10, 50, 100, 500, 900, 950, 968, 1936, 2904, 3872, 4840, 5808, 6776, 7744]
+    ret_periods: [3, 10, 50]
+    diff_periods: [3, 10,  50]
+    rz_windows: [3, 7, 14, 30]
+    ewm_spans: [5, 10, 50]
     keep_rmean_rstd: true
     cs_cols: ["feature_06", "feature_59", "feature_04", "feature_76", "feature_75", "feature_60", "feature_26"]              # 若后续要做截面rank，再指定列名
 
-  fe_pad_days: 5 #50
+  fe_pad_days: 50
   fe_core_days: 30
 
 
@@ -214,17 +209,6 @@ lgb_best:
   lambda_l2: 17.323522915498703
   lambda_l1: 3.005575058716044
   min_gain_to_split: 0.07080725777960455
-
-tft:
-  lr: 1e-3
-  precision: 32
-  hidden_size: 64
-  heads: 2
-  dropout: 0.2
-  enc_len: 30
-  batch_size: 64
-  max_epochs: 2
-  grad_clip: 0.5
 
 
 # --------- 列级白名单（强约束，防止隐形泄露） ---------

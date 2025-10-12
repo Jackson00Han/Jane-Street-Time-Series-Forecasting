@@ -11,7 +11,6 @@ from tqdm.auto import tqdm
 from pipeline.io import cfg, P, ensure_dir_local
 from pipeline.memmap import make_sliding_cv_fast
 
-
 # ---------- utils ----------
 def load_mm(prefix: str):
     meta_path = f"{prefix}.meta.json"
