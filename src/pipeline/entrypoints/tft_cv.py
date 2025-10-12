@@ -1,7 +1,7 @@
-# tft_cv.py  —— 统一 lightning.pytorch，按 symbol 标准化 + 缺失标记
+# tft_mae.py  —— TFT + 加权MAE（权重只用于loss，不做特征；不标准化权重）
 
 from __future__ import annotations
-import os, time
+import time
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -13,20 +13,23 @@ from lightning.pytorch.loggers import TensorBoardLogger
 
 from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
 from pytorch_forecasting.data import NaNLabelEncoder
-from pytorch_forecasting.metrics import SMAPE
+from pytorch_forecasting.metrics import MAE  # 用 MAE 训练
+from pytorch_forecasting.data.encoders import TorchNormalizer
 
+# 项目内工具
 from pipeline.io import cfg, P, fs, storage_options, ensure_dir_local
 
-def _now(): return time.strftime("%Y-%m-%d %H:%M:%S")
+def _now(): 
+    return time.strftime("%Y-%m-%d %H:%M:%S")
 
 # ---------- 工具函数 ----------
 def add_missing_flags_and_fill(df: pd.DataFrame, group_col: str, cont_cols: list[str]) -> tuple[list[str], pd.DataFrame]:
     """连续特征：添加 __isna 标记，组内 ffill，兜底 0 填充。"""
     if not cont_cols:
         return [], df
+    df = df.copy()
     df[cont_cols] = df[cont_cols].replace([np.inf, -np.inf], np.nan)
     flags = []
-    # grouped ffill
     g = df.groupby(group_col, observed=False)
     for c in cont_cols:
         flag = f"{c}__isna"
@@ -43,19 +46,17 @@ def standardize_by_symbol(train_df: pd.DataFrame,
                           eps: float = 1e-6):
     """按 symbol 对连续特征做标准化；val 用 train 的统计量，新 symbol 回退到 train 的全局统计。"""
     if not cont_cols:
-        # 没有需要标准化的列，直接返回
         return train_df, val_df, pd.DataFrame(), pd.DataFrame()
 
     mu_df  = train_df.groupby(group_col, observed=False)[cont_cols].mean()
     std_df = train_df.groupby(group_col, observed=False)[cont_cols].std(ddof=1).clip(lower=eps)
 
-    # train
     train_mu  = mu_df.loc[train_df[group_col]].to_numpy()
     train_std = std_df.loc[train_df[group_col]].to_numpy()
     X_train   = train_df[cont_cols].to_numpy(dtype=np.float32)
+    train_df  = train_df.copy()
     train_df[cont_cols] = ((X_train - train_mu) / train_std).astype(np.float32)
 
-    # val
     val_syms = val_df[group_col]
     if (~val_syms.isin(mu_df.index)).any():
         g_mu  = train_df[cont_cols].mean()
@@ -66,23 +67,24 @@ def standardize_by_symbol(train_df: pd.DataFrame,
         val_mu  = mu_df.loc[val_syms].to_numpy()
         val_std = std_df.loc[val_syms].to_numpy()
     X_val = val_df[cont_cols].to_numpy(dtype=np.float32)
+    val_df = val_df.copy()
     val_df[cont_cols] = ((X_val - val_mu) / val_std).astype(np.float32)
     return train_df, val_df, mu_df, std_df
 
 def build_trainer():
-    precision = "bf16-mixed" if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 32
     torch.set_float32_matmul_precision("medium")
-    logger = TensorBoardLogger(save_dir=P("local", "tft/logs"), name="tft", default_hp_metric=False)
+    logger = TensorBoardLogger(save_dir=P("local", "tft/logs"), name="tft_mae", default_hp_metric=False)
     callbacks = [
         EarlyStopping(monitor="val_loss", mode="min", patience=5),
-        ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1, filename="tft-best-{epoch:02d}-{val_loss:.5f}"),
+        ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1,
+                        filename="tft-best-{epoch:02d}-{val_loss:.5f}"),
         LearningRateMonitor(logging_interval="step"),
     ]
     trainer = L.Trainer(
         max_epochs=int(cfg.get("tft", {}).get("max_epochs", 2)),
         accelerator="auto",
-        precision=precision,
-        gradient_clip_val=float(cfg.get("tft", {}).get("grad_clip", 1.0)),
+        precision=int(cfg.get("tft", {}).get("precision", 32)),  # 先 32，稳定后可换 bf16-mixed
+        gradient_clip_val=float(cfg.get("tft", {}).get("grad_clip", 0.5)),
         log_every_n_steps=50,
         callbacks=callbacks,
         logger=logger,
@@ -90,21 +92,22 @@ def build_trainer():
     )
     return trainer
 
+
 # ---------- 主流程 ----------
 def main():
     print(f"[{_now()}][tft] ===== start =====")
     target_col = cfg["target"]                 # 如 "responder_6"
     g_sym, g_date, g_time = cfg["keys"]        # 如 ("symbol_id","date_id","time_id")
+    weight_col = cfg["weight"]
     TIME_SORT = cfg["sorts"].get("time_major", [g_date, g_time, g_sym])
 
     # 1) 选择特征列（示例：你后续替换为真实列表）
-    base_features   = ["feature_01"]                 # TODO: 放入你的 79 原始列子集
+    base_features   = ["feature_01"]                 # TODO: 放入你的真实特征集合
     resp_his_feats  = ["responder_6_prevday_close"]  # 示例
     feat_his_feats  = ["feature_00__lag1"]           # 示例
     feature_cols = list(dict.fromkeys(base_features + resp_his_feats + feat_his_feats))
 
-    # TSD 的 unknown_reals = 解码期未知的连续变量（不含 target）
-    need_cols = list(dict.fromkeys(cfg["keys"] + [target_col] + feature_cols))
+    need_cols = list(dict.fromkeys(cfg["keys"] + [weight_col] + [target_col] + feature_cols))
 
     # 2) 读 panel（Lazy） & 构 grid
     panel_dir = P("az", cfg["paths"].get("panel_shards", "panel_shards"))
@@ -117,9 +120,9 @@ def main():
     if not Path(grid_path).exists():
         lf_grid = (
             lf.select([g_date, g_time]).unique()
-              .sort([g_date, g_time])
-              .with_row_index("time_idx")
-              .with_columns(pl.col("time_idx").cast(pl.Int64))
+            .sort([g_date, g_time])
+            .with_row_index("time_idx")
+            .with_columns(pl.col("time_idx").cast(pl.Int64))
         )
         ensure_dir_local(Path(grid_path).parent.as_posix())
         lf_grid.collect(streaming=True).write_parquet(grid_path, compression="zstd")
@@ -142,7 +145,7 @@ def main():
     )
     print(f"[{_now()}][tft] schema -> {lw_with_idx.collect_schema().names()}")
 
-    # 4) 小窗 demo → pandas
+    # 4) 取一个窗口 demo → pandas（你可以换成全量）
     demo_lo, demo_hi = 1600, 1630
     df = (
         lw_with_idx
@@ -155,9 +158,21 @@ def main():
     df[g_sym] = df[g_sym].astype("string").astype("category")
     df["time_idx"] = df["time_idx"].astype("int64")
 
-    # 缺失处理（只作用于连续特征，不动 target）
+    # 目标：只保留有限值样本
+    df[target_col] = pd.to_numeric(df[target_col], errors="coerce")
+    df = df[np.isfinite(df[target_col])]
+
+    # 权重：保持“原始权重”参与 loss（不做特征/不标准化）
+    w = pd.to_numeric(df[weight_col], errors="coerce").astype("float32")
+    w = w.replace([np.inf, -np.inf], 0.0).fillna(0.0)       # 仅把非有限值设为0
+    w = w.clip(lower=0.0).astype("float32")                 # 非负约束
+    df[weight_col] = w
+
+    # 缺失处理（只作用于连续特征，不动 target/weight）
     miss_flags, df = add_missing_flags_and_fill(df, g_sym, feature_cols)
-    unknown_reals = list(dict.fromkeys(feature_cols + miss_flags))  # 特征 + 标记（不含 target）
+
+    # unknown_reals：特征 + 标记（不包含 weight）
+    unknown_reals = list(dict.fromkeys(feature_cols + miss_flags))
 
     # 降精度
     for c in unknown_reals:
@@ -170,9 +185,9 @@ def main():
     train_df = df[df["time_idx"] <= cutoff].copy()
     val_df   = df[df["time_idx"] >  cutoff].copy()
 
-    # 5) 按 symbol 标准化（仅连续特征；不含 missing flags / target）
+    # 5) 按 symbol 标准化（仅连续特征；不含 missing flags / target / weight）
     cont_cols = [c for c in feature_cols if c in train_df.columns]
-    train_df, val_df, mu_df, std_df = standardize_by_symbol(train_df, val_df, g_sym, cont_cols)
+    train_df, val_df, _, _ = standardize_by_symbol(train_df, val_df, g_sym, cont_cols)
     for c in cont_cols:
         train_df[c] = train_df[c].astype("float32")
         val_df[c]   = val_df[c].astype("float32")
@@ -182,27 +197,26 @@ def main():
 
     print(f"[{_now()}][tft] standardize done, cont_cols={len(cont_cols)}")
 
-    # 6) TimeSeriesDataSet
+    # 6) TimeSeriesDataSet —— 把权重列作为 weight 传入；不要放进 unknown_reals； 按照group对自变量做标准化
     training = TimeSeriesDataSet(
         train_df.sort_values([g_sym, "time_idx"]),
         time_idx="time_idx",
         target=target_col,
         group_ids=[g_sym],
-        static_categoricals=[g_sym],        # == ["symbol_id"]
-        static_reals=[],
-        time_varying_known_categoricals=[], # 后续可加入交易日历等“未来可知”变量
-        time_varying_known_reals=[],
-        time_varying_unknown_categoricals=[],
-        time_varying_unknown_reals=unknown_reals,  # 只放特征与标记（不含 target）
+        static_categoricals=[g_sym],
+        time_varying_unknown_reals=unknown_reals,   # 不含 weight
         max_encoder_length=int(cfg.get("tft",{}).get("enc_len", 30)),
         max_prediction_length=1,
-        target_normalizer=None,             # 先不对 target 做归一化
+        target_normalizer=None,
+        group_normalization=True,  # 按组对自变量做标准化
+        
         categorical_encoders={g_sym: NaNLabelEncoder(add_nan=True)},
-        add_relative_time_idx=True,
-        add_target_scales=True,
-        add_encoder_length=True,
+        add_relative_time_idx=True, add_target_scales=True, add_encoder_length=True,
         allow_missing_timesteps=True,
+        weight=weight_col,       # 关键：启用“样本加权”
     )
+
+
     validation = TimeSeriesDataSet.from_dataset(training, val_df, stop_randomization=True)
 
     train_loader = training.to_dataloader(
@@ -212,25 +226,26 @@ def main():
         train=False, batch_size=int(cfg.get("tft",{}).get("batch_size", 1024)), num_workers=4
     )
 
-    # 7) Trainer + Model
-    L.seed_everything(int(cfg.get("seed", 42)), workers=True)
-    trainer = build_trainer()
-
+    # 7) 模型：用 MAE 做训练（PF 会自动做 sum(w*|y - yhat|)/sum(w)）
     tft = TemporalFusionTransformer.from_dataset(
         training,
-        learning_rate=float(cfg.get("tft",{}).get("lr", 1e-3)),
-        hidden_size=int(cfg.get("tft",{}).get("hidden_size",128)),
-        attention_head_size=int(cfg.get("tft",{}).get("heads",4)),
-        dropout=float(cfg.get("tft",{}).get("dropout",0.2)),
-        loss=SMAPE(),
+        loss=MAE(),
+        # 可选：你也可以加 logging_metrics=[MAE()]，但 val_loss 已是加权 MAE
+        learning_rate=float(cfg.get("tft", {}).get("lr", 1e-3)),
+        hidden_size=int(cfg.get("tft", {}).get("hidden_size", 128)),
+        attention_head_size=int(cfg.get("tft", {}).get("heads", 4)),
+        dropout=float(cfg.get("tft", {}).get("dropout", 0.2)),
         reduce_on_plateau_patience=4,
     )
 
-    # 保险：模型基类一致性（防止再遇到 “model must be LightningModule”）
-    assert isinstance(tft, L.LightningModule), f"type={type(tft)}"
+    print("x_reals (model sees):", tft.hparams.x_reals)  # 确认不包含 'weight'
 
+    # 8) Trainer
+    L.seed_everything(int(cfg.get("seed", 42)), workers=True)
+    trainer = build_trainer()
     trainer.fit(tft, train_loader, val_loader)
     print(f"[{_now()}][tft] ===== finished =====")
+
 
 if __name__ == "__main__":
     main()
