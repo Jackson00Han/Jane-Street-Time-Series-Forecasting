@@ -72,7 +72,7 @@ def main():
     print(f"[fixed] loaded memmap: N={meta['n_rows']:,}, F={meta['n_feat']}, prefix={prefix}")
 
     # =========================
-    # 2) 选择“小样本日期窗”用于评测固定超参
+    # 2) 选择“日期窗”
     # =========================
     try:
         win = cfg["dates"]["tune_dates"]
@@ -89,7 +89,7 @@ def main():
     print(f"[fixed] using date range [{lo}, {hi}] -> {idx.size:,} rows")
 
     # =========================
-    # 3) CV 构造（在小窗内）
+    # 3) CV 构造
     # =========================
     cv_cfg = cfg["cv"]
     n_splits = int(cv_cfg["n_splits"])
@@ -143,6 +143,9 @@ def main():
     # 6) 逐折训练与评估（无 Optuna）
     # =========================
     fold_scores, best_iters = [], []
+    # 建立dataframe，存放每折的特征重要性（便于横向比较）
+    
+    ranking_features = pd.DataFrame({"feature": feat_cols})
     
     
     for k, (tr_idx, va_idx) in enumerate(tqdm(folds, desc="fixed_cv", leave=False), 1):
@@ -174,6 +177,9 @@ def main():
         fold_scores.append(wr2_k)
         best_iters.append(it_k)
         
+        # 记录每折的特征重要性
+        g = bst.feature_importance(importance_type='gain', iteration=bst.best_iteration or tune_rounds).astype(float)
+        ranking_features[f"fold_{k}_gain"] = (g / g.sum()) if g.sum() > 0 else np.zeros_like(g, dtype=float)
         # 释放
         bst.free_dataset(); del dtrain, dvalid, bst
         gc.collect()
@@ -181,13 +187,24 @@ def main():
     mean_wr2 = float(np.mean(fold_scores))
     print(f"[fixed] mean_wr2={mean_wr2:.6f} | per-fold={np.round(fold_scores, 6)}")
     
-
-    # =========================
-    # 7) 落盘：固定参数的 CV 结果
-    # =========================
     ts = int(time.time())
     tag = f"fixed__mm_{Path(prefix).name}__range{lo}-{hi}__cv{n_splits}-g{gap_days}-r{ratio}__{ts}"
     
+    
+    # 保存每折特征重要性
+    fi_col = [c for c in ranking_features.columns if c.startswith('fold_')]
+    ranking_features['mean_gain'] = ranking_features[fi_col].mean(axis=1)
+    ranking_features = ranking_features.sort_values('mean_gain', ascending=False, ignore_index=True)
+    
+    fi_path = os.path.join(tune_dir, f"feature_importance__fixed__{tag}.csv")
+    
+    ranking_features[["feature", "mean_gain"]].to_csv(fi_path, index=False)
+    print(f"[fixed][done] feature importance -> {fi_path}")
+    
+    # =========================
+    # 7) 落盘：固定参数的 CV 结果
+    # =========================
+
     # summary json
     out_path = os.path.join(tune_dir, f"{tag}.json")
     with open(out_path, "w", encoding="utf-8") as f:
@@ -202,7 +219,7 @@ def main():
             "num_boost_round": tune_rounds,
             "early_stopping_rounds": es_rounds,
             "seed": seed_val,
-            "features": feat_cols,
+            "features": feat_cols, # 后期可改为fi_path
             "n_rows": int(meta["n_rows"]),
             "n_feat": int(meta["n_feat"]),
             "params": fixed_params,
