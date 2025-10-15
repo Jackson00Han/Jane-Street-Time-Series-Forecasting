@@ -1,4 +1,4 @@
-attention_head_size: 1
+attention_head_size: 2
 categorical_groups: {}
 causal_attention: true
 dataset_parameters:
@@ -207,9 +207,9 @@ dataset_parameters:
   group_ids:
   - symbol_id
   lags: null
-  max_encoder_length: 20
+  max_encoder_length: 10
   max_prediction_length: 1
-  min_encoder_length: 20
+  min_encoder_length: 10
   min_prediction_idx: !!python/object/apply:numpy._core.multiarray.scalar
   - &id002 !!python/object/apply:numpy.dtype
     args:
@@ -1075,14 +1075,13 @@ embedding_sizes:
 hidden_continuous_size: 16
 hidden_continuous_sizes: {}
 hidden_size: 32
-learning_rate: 0.001
+learning_rate: 1.0e-05
 log_gradient_flow: false
 log_interval: -1
 log_val_interval: null
-logging_metrics: []
 lstm_layers: 1
 mask_bias: -1000000000.0
-max_encoder_length: 20
+max_encoder_length: 10
 monotone_constaints: {}
 monotone_constraints: {}
 optimizer: !!python/name:torch.optim.adamw.AdamW ''
