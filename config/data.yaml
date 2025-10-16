@@ -133,7 +133,6 @@ feature_eng:
   A:
     enabled: true
     is_sorted: false
-    prev_soft_days: 1
     cast_f32: true
     # 适度的尾部滞后
     tail_lags: [1, 10, 50, 100, 500, 900, 950, 967]
@@ -154,7 +153,6 @@ feature_eng:
   C:
     enabled: true
     is_sorted: false
-    prev_soft_days: null
     cast_f32: true
     batch_size: 10
     # 适度的历史派生
