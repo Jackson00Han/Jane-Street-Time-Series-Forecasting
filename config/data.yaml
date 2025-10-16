@@ -66,7 +66,7 @@ dates:
 
   fe_dates:
     date_lo: 800
-    date_hi: 1600
+    date_hi: 831
 
   panel_dates:
     date_lo: 800
@@ -164,7 +164,7 @@ feature_eng:
     keep_rmean_rstd: true
     cs_cols: ["feature_06", "feature_59", "feature_04", "feature_76", "feature_75", "feature_60", "feature_26"]              # 若后续要做截面rank，再指定列名
 
-  fe_pad_days: 50
+  fe_pad_days: 30
   fe_core_days: 30
 
 

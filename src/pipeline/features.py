@@ -112,7 +112,7 @@ def fe_resp_daily(
     gap1 = (pl.col(g_date) - prev_day).cast(pl.Int32)
 
     # 断档：gap != 1 的地方开新段；用累计和得到“连续段 id”
-    streak_id = pl.when(gap1.fill_null(1) != 1).then(1).otherwise(0).cumsum().over(g_symbol).alias("__streak_id")
+    streak_id = pl.when(gap1.fill_null(1) != 1).then(1).otherwise(0).cum_sum().over(g_symbol).alias("__streak_id")
     daily = daily.with_columns([gap1.alias("__gap1"), streak_id])
 ################************************************################   
     
@@ -146,20 +146,47 @@ def fe_resp_daily(
     )
 
 
-    # 4) 跨日 rolling（以当日收盘 close 为基）
+    # 4) 跨日 rolling（以当日收盘 close 为基）——用分段累加+差分，避免 rolling_*().over(...)
     if rolling_windows:
         wins = sorted({int(w) for w in rolling_windows if int(w) > 1})
-        roll_exprs = []
+
+        # 在每个 (symbol, __streak_id) 段内生成递增行号 __rn（1..段长）
+        daily = daily.with_columns(
+            pl.int_range(1, pl.len() + 1).over([g_symbol, "__streak_id"]).alias("__rn")
+        )
+
+        # 为每个 responder 预先构造分段累计和与平方累计和
+        prep_exprs = []
         for r in rep_cols:
             base = pl.col(f"{r}_prevday_close")
+            prep_exprs += [
+                base.cum_sum().over([g_symbol, "__streak_id"]).alias(f"__cs_{r}"),
+                (base * base).cum_sum().over([g_symbol, "__streak_id"]).alias(f"__cs2_{r}"),
+            ]
+        daily = daily.with_columns(prep_exprs)
+
+        # 基于累计和做窗口差分，得到 mean/std（ddof=1；首 w-1 行使用更小样本数）
+        roll_exprs = []
+        rn = pl.col("__rn")
+        for r in rep_cols:
+            cs  = pl.col(f"__cs_{r}")
+            cs2 = pl.col(f"__cs2_{r}")
             for w in wins:
-                roll_exprs += [
-                    base.rolling_mean(window_size=w, min_samples=1).over([g_symbol, "__streak_id"])
-                        .alias(f"{r}_close_roll{w}_mean"),
-                    base.rolling_std(window_size=w, ddof=1, min_samples=2).over([g_symbol, "__streak_id"])
-                        .alias(f"{r}_close_roll{w}_std"),
-                ]
-        daily = daily.with_columns(roll_exprs)
+                n = pl.when(rn >= w).then(pl.lit(w)).otherwise(rn).cast(pl.Float32)
+                sum_w  = (cs  - cs.shift(w).over([g_symbol, "__streak_id"]))
+                sum2_w = (cs2 - cs2.shift(w).over([g_symbol, "__streak_id"]))
+                mean_w = (sum_w / n).alias(f"{r}_close_roll{w}_mean")
+                var_w  = (sum2_w - (sum_w * sum_w) / n) / (n - 1.0)
+                std_w  = pl.when(n >= 2.0).then(var_w.clip(0.0, None).sqrt()).otherwise(None) \
+                        .alias(f"{r}_close_roll{w}_std")
+                # 等价写法：var_w.clip(lower_bound=0.0)
+
+                roll_exprs += [mean_w, std_w]
+
+        daily = daily.with_columns(roll_exprs).drop(
+            ["__rn", *[f"__cs_{r}" for r in rep_cols], *[f"__cs2_{r}" for r in rep_cols]]
+        )
+
 
     # 5) 整体 shift(1)
     all_cols = set(daily.collect_schema().names())
@@ -430,7 +457,7 @@ def fe_feat_history(
     gap1      = (pl.col(g_date) - prev_day).cast(pl.Int32).alias("__gap1")
     streak_id = (
         pl.when(pl.col("__gap1").fill_null(1) != 1).then(1).otherwise(0)
-          .cumsum().over(by_grp)
+          .cum_sum().over(by_grp)
           .alias("__streak_id")
     )
     lf_out = lf_out.with_columns([gap1, streak_id])

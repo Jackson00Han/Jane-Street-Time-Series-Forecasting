@@ -46,7 +46,6 @@ def main():
         tail_lags=A_cfg.get("tail_lags", [1]),
         tail_diffs=A_cfg.get("tail_diffs", [1]),
         rolling_windows=A_cfg.get("rolling_windows", [3]),
-        prev_soft_days=A_cfg.get("prev_soft_days", 3),
         is_sorted=A_cfg.get("is_sorted", False),
         cast_f32=A_cfg.get("cast_f32", True),
     ) if A_cfg.get("enabled", True) else None
@@ -66,7 +65,6 @@ def main():
         ewm_spans=C_cfg.get("ewm_spans", [10]),
         keep_rmean_rstd=C_cfg.get("keep_rmean_rstd", True),
         cs_cols=C_cfg.get("cs_cols", None),
-        prev_soft_days=C_cfg.get("prev_soft_days", 7),
         batch_size=C_cfg.get("batch_size", 10),
         is_sorted=C_cfg.get("is_sorted", False),
         cast_f32=C_cfg.get("cast_f32", True),
