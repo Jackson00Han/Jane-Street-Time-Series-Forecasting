@@ -55,38 +55,45 @@ from pipeline.validate import assert_time_monotone
 #
 # 同样的列会对 "responder_6" 生成一遍。
 
+import polars as pl
+from typing import Tuple, Sequence, Optional
+
 def fe_resp_daily(
     lf: pl.LazyFrame,
     *,
     keys: Tuple[str, str, str] = ("symbol_id","date_id","time_id"),
     rep_cols: Sequence[str],
     is_sorted: bool = False,
-    prev_soft_days: Optional[int] = None,
     cast_f32: bool = True,
     tail_lags: Sequence[int] = (1,),
     tail_diffs: Sequence[int] = (1,),
     rolling_windows: Sequence[int] | None = (3,),
 ) -> pl.LazyFrame:
-    """一次日频聚合得到昨日尾部与日级摘要 → 统一 TTL 到“对 d 生效的历史值” → 回拼到 tick 级。"""
+    """
+    日级特征工程（最小必要版）：
+      1) 对每个 (symbol, date) 统计：当日尾部倒序值、日收/均/方差，派生 dK、overnight、跨日 rolling；
+      2) 将“当日量”转为“对 d 生效”（严格相邻自然日的 shift(1)）；
+      3) 按 (symbol, date) 左连回 tick 级。
+    """
     g_symbol, g_date, g_time = keys
 
-    # 若未保证排序，这里补一次（只影响 lf；日频表仍会再按 (symbol,date) 排）
+    # 0) 输入排序（保障后续 over/rolling 等时序操作正确）
     if not is_sorted:
         lf = lf.sort([g_symbol, g_date, g_time])
 
-    # --- 一次性日频聚合 ---
-    need_L = sorted(set(tail_lags) | {k+1 for k in tail_diffs} | {1})
+    # 1) 当日聚合（尾部倒序 + 当日统计）
+    need_L = sorted(set(tail_lags) | {k + 1 for k in tail_diffs} | {1})
     agg_exprs: list[pl.Expr] = []
     for r in rep_cols:
-        # 尾部倒数第 L（长度不足 L → null）
+        # 当日内按 time 排序后的倒数第 L（长度不足 L → null）
         for L in need_L:
             agg_exprs.append(
                 pl.when(pl.len() >= L)
-                .then(pl.col(r).sort_by(pl.col(g_time)).tail(L).first())
-                .otherwise(None)
-                .alias(f"{r}_prev_tail_lag{L}")
+                  .then(pl.col(r).sort_by(pl.col(g_time)).tail(L).first())
+                  .otherwise(None)
+                  .alias(f"{r}_prev_tail_lag{L}")
             )
-        # 当日统计（显式补上 prevday_close）
+        # 显式当日统计
         agg_exprs += [
             pl.col(r).sort_by(pl.col(g_time)).last().alias(f"{r}_prevday_close"),
             pl.col(r).mean().alias(f"{r}_prevday_mean"),
@@ -95,75 +102,90 @@ def fe_resp_daily(
 
     daily = (
         lf.group_by([g_symbol, g_date])
-        .agg(agg_exprs)
-        .sort([g_symbol, g_date])                # 供下面 shift/ffill 正确运行
+          .agg(agg_exprs)
+          .sort([g_symbol, g_date])   # 保障 over(g_symbol) 的时序正确
     )
 
-    # 派生（当日）dK：last - (K+1 from end)
+################************************************################
+    # 添加两个关键列，把“是否相邻自然日”和“连续区间”显式化, 若想放宽条件，把gap1 调成为自己可接受的区间即可，如 gap1 <=5, 并修改下面的相应几个位置
+    prev_day = pl.col(g_date).shift(1).over(g_symbol)
+    gap1 = (pl.col(g_date) - prev_day).cast(pl.Int32)
+
+    # 断档：gap != 1 的地方开新段；用累计和得到“连续段 id”
+    streak_id = pl.when(gap1.fill_null(1) != 1).then(1).otherwise(0).cumsum().over(g_symbol).alias("__streak_id")
+    daily = daily.with_columns([gap1.alias("__gap1"), streak_id])
+################************************************################   
+    
+    # 2) 当日派生：dK（last - 倒数第 K+1）
     daily = daily.with_columns([
         (pl.col(f"{r}_prev_tail_lag1") - pl.col(f"{r}_prev_tail_lag{K+1}")).alias(f"{r}_prev_tail_d{K}")
         for r in rep_cols for K in tail_diffs
-        if f"{r}_prev_tail_lag{K+1}" in daily.collect_schema().names()
     ])
 
-    # prev2day/overnight/rolling（仍是“当日相对”的量）
-    daily = daily.with_columns([
-        pl.col(f"{r}_prevday_close").shift(1).over(g_symbol).alias(f"{r}_prev2day_close")
-        for r in rep_cols
-    ]).with_columns(
-        [
-            (pl.col(f"{r}_prevday_close") - pl.col(f"{r}_prevday_mean")).alias(f"{r}_prevday_close_minus_mean")
+    # 3) 跨日衍生：prev2day / overnight / close-mean
+
+    daily = (
+        daily.with_columns([
+            # 只有 gap==1 才认“昨天”
+            pl.when(pl.col("__gap1") == 1)
+            .then(pl.col(f"{r}_prevday_close").shift(1).over(g_symbol))
+            .otherwise(None)
+            .alias(f"{r}_prev2day_close")
             for r in rep_cols
-        ] + [
-            (pl.col(f"{r}_prevday_close") - pl.col(f"{r}_prev2day_close")).alias(f"{r}_overnight_gap")
-            for r in rep_cols
-        ]
+        ])
+        .with_columns(
+            [
+                (pl.col(f"{r}_prevday_close") - pl.col(f"{r}_prevday_mean")).alias(f"{r}_prevday_close_minus_mean")
+                for r in rep_cols
+            ] + [
+                # 如果不是严格“昨天”，overnight 置空
+                (pl.col(f"{r}_prevday_close") - pl.col(f"{r}_prev2day_close")).alias(f"{r}_overnight_gap")
+                for r in rep_cols
+            ]
+        )
     )
 
+
+    # 4) 跨日 rolling（以当日收盘 close 为基）
     if rolling_windows:
         wins = sorted({int(w) for w in rolling_windows if int(w) > 1})
-        roll_exprs: list[pl.Expr] = []
+        roll_exprs = []
         for r in rep_cols:
             base = pl.col(f"{r}_prevday_close")
             for w in wins:
                 roll_exprs += [
-                    base.rolling_mean(window_size=w, min_samples=1).over(g_symbol)
+                    base.rolling_mean(window_size=w, min_samples=1).over([g_symbol, "__streak_id"])
                         .alias(f"{r}_close_roll{w}_mean"),
-                    base.rolling_std(window_size=w, ddof=1, min_samples=2).over(g_symbol)
+                    base.rolling_std(window_size=w, ddof=1, min_samples=2).over([g_symbol, "__streak_id"])
                         .alias(f"{r}_close_roll{w}_std"),
                 ]
         daily = daily.with_columns(roll_exprs)
 
-    # === 核心：将上面的“当日统计/尾部衍生列”转换为“对 d 生效的历史 TTL 值” ===
-    prev_cols = [c for c in daily.collect_schema().names() if c not in (g_symbol, g_date)]
-    exprs: list[pl.Expr] = []
+    # 5) 整体 shift(1)
+    all_cols = set(daily.collect_schema().names())
+    prev_cols = [
+        c for c in all_cols
+        if c not in (g_symbol, g_date, "__gap1", "__streak_id")
+    ]
+
+    hist_exprs = []
     for c in prev_cols:
-        # 最近一次（发生在当前日之前）的非空日期与值
-        last_non_null_day = (
-            pl.when(pl.col(c).is_not_null()).then(pl.col(g_date)).otherwise(None)
-            .forward_fill().over(g_symbol)
-            .shift(1)
-        )
-        last_non_null_val = pl.col(c).forward_fill().over(g_symbol).shift(1)
-
-        if prev_soft_days is None:
-            resolved = last_non_null_val  # 无限 TTL：总取最近一次历史非空
-        else:
-            gap_days = (pl.col(g_date) - last_non_null_day).cast(pl.Int32)
-            resolved = pl.when(gap_days.is_not_null() & (gap_days <= int(prev_soft_days))) \
-                        .then(last_non_null_val) \
-                        .otherwise(None)
-
+        prev_val = pl.col(c).shift(1).over(g_symbol)
+        resolved = pl.when(pl.col("__gap1") == 1).then(prev_val).otherwise(None)
         if cast_f32:
             resolved = resolved.cast(pl.Float32)
-        exprs.append(resolved.alias(c))    # 列名不变，语义已是“对 d 生效的历史值”
-
-    daily_prev = daily.with_columns(exprs)
-
-    # 回拼到 tick 级（左连），并固定顺序（可选）
-    out = lf.join(daily_prev, on=[g_symbol, g_date], how="left")
-    out = out.sort([g_symbol, g_date, g_time])
+        hist_exprs.append(resolved.alias(c))
+        
+    daily_prev = daily.with_columns(hist_exprs).drop(["__gap1", "__streak_id"])
+    
+    
+    # 6) 回拼 tick 级并固定顺序
+    out = (
+        lf.join(daily_prev, on=[g_symbol, g_date], how="left")
+          .sort([g_symbol, g_date, g_time])
+    )
     return out
+
 
 
 
