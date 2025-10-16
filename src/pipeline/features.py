@@ -366,6 +366,8 @@ def fe_resp_same_tick_xday(
 #     但由于 C 的 lag 是 tick 级，通常几十天的 pad 已很充裕。
 #   - 大量滞后档位会迅速膨胀列数，建议先多给，再用特征筛选（FI、非空率、方差）做裁剪。
 
+import polars as pl
+from typing import Tuple, Sequence, Optional, Iterable
 
 def fe_feat_history(
     *,
@@ -373,7 +375,6 @@ def fe_feat_history(
     keys: Tuple[str,str,str] = ("symbol_id","date_id","time_id"),
     feature_cols: Sequence[str],
     is_sorted: bool = False,
-    prev_soft_days: Optional[int] = None,
     cast_f32: bool = True,
     batch_size: int = 10,
     lags: Iterable[int] = (1, 3),
@@ -384,12 +385,20 @@ def fe_feat_history(
     keep_rmean_rstd: bool = True,
     cs_cols: Optional[Sequence[str]] = None,
 ) -> pl.LazyFrame:
-    
-    g_sym, g_date, g_time = keys
-    
-    by_grp = [g_sym]
-    by_cs  = [g_date, g_time]
+    """
+    协变量（feature0..N）的时序衍生（与 A/B 同风格，且 rolling/截面用 t-0）：
+      - 严格自然日 k 日滞后（__lag{k}）：仅当 (date_now - date_shifted) == k 才保留
+      - returns / diffs 基于“严格 lag”
+      - rolling / EWM 使用 **t-0 当期值**，并在“连续段”内计算（断档处重置）
+      - 截面 z / rank 使用 **t-0 当期值**，按 (date, time) 横截面计算
+    注意：date_id 应为“自然日序号”（相邻自然日差为 1），不是 YYYYMMDD 原样数。
+    """
 
+    g_sym, g_date, g_time = keys
+    by_grp = [g_sym]            # 组内：沿 date 的时序运算
+    by_cs  = [g_date, g_time]   # 截面：同一时点 (date, time)
+
+    # --- 校验 + 排序 ---
     need_cols = [*keys, *feature_cols]
     schema = lf.collect_schema().names()
     miss = [c for c in need_cols if c not in schema]
@@ -400,11 +409,11 @@ def fe_feat_history(
     if not is_sorted:
         lf_out = lf_out.sort(list(keys))
 
+    # 小工具
     def _chunks(lst, k):
         for i in range(0, len(lst), k):
             yield lst[i:i+k]
 
-    # ---- 规范化参数：None/[] -> 空元组；并去重/转 int/保正数 ----
     def _clean_pos_sorted_unique(x):
         if not x:
             return tuple()
@@ -416,98 +425,81 @@ def fe_feat_history(
     RZW    = _clean_pos_sorted_unique(rz_windows)
     SPANS  = _clean_pos_sorted_unique(ewm_spans)
 
-    # C1 lags
+    # === 连续性分段：严格自然日（gap==1 连续；gap!=1 断档）===
+    prev_day  = pl.col(g_date).shift(1).over(by_grp)
+    gap1      = (pl.col(g_date) - prev_day).cast(pl.Int32).alias("__gap1")
+    streak_id = (
+        pl.when(pl.col("__gap1").fill_null(1) != 1).then(1).otherwise(0)
+          .cumsum().over(by_grp)
+          .alias("__streak_id")
+    )
+    lf_out = lf_out.with_columns([gap1, streak_id])
+
+    # C1 严格自然日 lag：只接受 gap_k == k
     if LAGS:
         for batch in _chunks(feature_cols, batch_size):
             exprs = []
             for L in LAGS:
                 last_date_L = pl.col(g_date).shift(L).over(by_grp)
                 gap_L = (pl.col(g_date) - last_date_L).cast(pl.Int32)
-                if prev_soft_days is not None:
-                    keep_L = gap_L.is_not_null() & (gap_L > 0) & (gap_L <= pl.lit(int(prev_soft_days)))
+                keep_L = gap_L.is_not_null() & (gap_L == L)
                 for c in batch:
-                    e = pl.col(c).shift(L).over(by_grp)
-                    if prev_soft_days is not None:
-                        e = pl.when(keep_L).then(e).otherwise(None)
+                    e = pl.when(keep_L).then(pl.col(c).shift(L).over(by_grp)).otherwise(None)
                     if cast_f32:
                         e = e.cast(pl.Float32)
                     exprs.append(e.alias(f"{c}__lag{L}"))
             lf_out = lf_out.with_columns(exprs)
 
-    # C2 returns（可选）
+    # C2 returns：基于严格 lag（分母近 0 置空）
     if K_RET:
         for batch in _chunks(feature_cols, batch_size):
             exprs = []
             for c in batch:
-                cur = pl.col(c)
+                cur = pl.col(c)  # t-0
                 for k in K_RET:
                     if k in LAGS:
-                        prev = pl.col(f"{c}__lag{k}")  # 已含 TTL
+                        prev = pl.col(f"{c}__lag{k}")   # 已是严格 lag
                     else:
-                        prev = pl.col(c).shift(k).over(by_grp)
-                        if prev_soft_days is not None:
-                            last_date_k = pl.col(g_date).shift(k).over(by_grp)
-                            gap_k = (pl.col(g_date) - last_date_k).cast(pl.Int32)
-                            keep_k = gap_k.is_not_null() & (gap_k > 0) & (gap_k <= pl.lit(int(prev_soft_days)))
-                            prev = pl.when(keep_k).then(prev).otherwise(None)
+                        last_date_k = pl.col(g_date).shift(k).over(by_grp)
+                        gap_k = (pl.col(g_date) - last_date_k).cast(pl.Int32)
+                        keep_k = gap_k.is_not_null() & (gap_k == k)
+                        prev = pl.when(keep_k).then(pl.col(c).shift(k).over(by_grp)).otherwise(None)
                     ret = pl.when(prev.is_not_null() & (prev.abs() > 1e-12)).then(cur / prev - 1.0).otherwise(None)
                     if cast_f32:
                         ret = ret.cast(pl.Float32)
                     exprs.append(ret.alias(f"{c}__ret{k}"))
             lf_out = lf_out.with_columns(exprs)
 
-
-    # C3 diffs（可选）
+    # C3 diffs：基于严格 lag
     if K_DIFF:
         for batch in _chunks(feature_cols, batch_size):
             exprs = []
             for c in batch:
-                cur = pl.col(c)
+                cur = pl.col(c)  # t-0
                 for k in K_DIFF:
                     if k in LAGS:
-                        prevk = pl.col(f"{c}__lag{k}")  # 已含 TTL
+                        prevk = pl.col(f"{c}__lag{k}")  # 严格 lag
                     else:
-                        prevk = pl.col(c).shift(k).over(by_grp)
-                        if prev_soft_days is not None:
-                            last_date_k = pl.col(g_date).shift(k).over(by_grp)
-                            gap_k = (pl.col(g_date) - last_date_k).cast(pl.Int32)
-                            keep_k = gap_k.is_not_null() & (gap_k > 0) & (gap_k <= pl.lit(int(prev_soft_days)))
-                            prevk = pl.when(keep_k).then(prevk).otherwise(None)
+                        last_date_k = pl.col(g_date).shift(k).over(by_grp)
+                        gap_k = (pl.col(g_date) - last_date_k).cast(pl.Int32)
+                        keep_k = gap_k.is_not_null() & (gap_k == k)
+                        prevk = pl.when(keep_k).then(pl.col(c).shift(k).over(by_grp)).otherwise(None)
                     d = pl.when(prevk.is_not_null()).then(cur - prevk).otherwise(None)
                     if cast_f32:
                         d = d.cast(pl.Float32)
                     exprs.append(d.alias(f"{c}__diff{k}"))
             lf_out = lf_out.with_columns(exprs)
 
-
-
-    # C4 rolling r-z
+    # C4 rolling r-z：段内滚动，**t-0 当期值**
     if RZW:
         for batch in _chunks(feature_cols, batch_size):
-            exprs_base = []
-            # 统一构造 t-1 的基准值（含 TTL 掩码）
-            if prev_soft_days is not None:
-                last_date_1 = pl.col(g_date).shift(1).over(by_grp)
-                gap_1 = (pl.col(g_date) - last_date_1).cast(pl.Int32)
-                keep_1 = gap_1.is_not_null() & (gap_1 > 0) & (gap_1 <= pl.lit(int(prev_soft_days)))
-
-            for c in batch:
-                # 若之前已在 C1 产出 __lag1，可直接用： base = pl.col(f"{c}__lag1")
-                base = pl.col(c).shift(1).over(by_grp)
-                if prev_soft_days is not None:
-                    base = pl.when(keep_1).then(base).otherwise(None)
-                exprs_base.append(base.alias(f"{c}__tminus1_base"))
-            lf_out = lf_out.with_columns(exprs_base)
-
-            # 真正的 rolling r-z
             roll_exprs = []
             for c in batch:
-                base = pl.col(f"{c}__tminus1_base")
+                base = pl.col(c)  # t-0
                 for w in RZW:
-                    m  = base.rolling_mean(window_size=w, min_samples=1).over(by_grp)
-                    s  = base.rolling_std(window_size=w, ddof=1, min_samples=2).over(by_grp)  # 统一 ddof=1
-                    den = (s.fill_null(0.0) + 1e-9)
-                    rz = (base - m) / den
+                    m  = base.rolling_mean(window_size=w, min_samples=1).over([*by_grp, "__streak_id"])
+                    s  = base.rolling_std(window_size=w, ddof=1, min_samples=2).over([*by_grp, "__streak_id"])
+                    rz = (base - m) / (s.fill_null(0.0) + 1e-9)
                     if cast_f32:
                         m = m.cast(pl.Float32); s = s.cast(pl.Float32); rz = rz.cast(pl.Float32)
                     if keep_rmean_rstd:
@@ -519,92 +511,46 @@ def fe_feat_history(
                     else:
                         roll_exprs.append(rz.alias(f"{c}__rz{w}"))
             lf_out = lf_out.with_columns(roll_exprs)
-            lf_out = lf_out.drop([f"{c}__tminus1_base" for c in batch])
 
-
-    # C5 EWM（可选）
+    # C5 EWM：段内计算，**t-0 当期值**
     if SPANS:
         for batch in _chunks(feature_cols, batch_size):
-            exprs_base = []
-
-            # TTL 掩码（t-1）
-            if prev_soft_days is not None:
-                last_date_1 = pl.col(g_date).shift(1).over(by_grp)
-                gap_1 = (pl.col(g_date) - last_date_1).cast(pl.Int32)
-                keep_1 = gap_1.is_not_null() & (gap_1 > 0) & (gap_1 <= pl.lit(int(prev_soft_days)))
-
-            # 构造 t-1 基准（若你已在 C1 产出 __lag1，可以直接用它替代下面两行）
-            for c in batch:
-                base = pl.col(c).shift(1).over(by_grp)
-                if prev_soft_days is not None:
-                    base = pl.when(keep_1).then(base).otherwise(None)
-                exprs_base.append(base.alias(f"{c}__tminus1_base"))
-            lf_out = lf_out.with_columns(exprs_base)
-
-            # 计算 EWM
             ewm_exprs = []
             for c in batch:
-                base = pl.col(f"{c}__tminus1_base")
+                base = pl.col(c)  # t-0
                 for s in SPANS:
-                    ema = base.ewm_mean(span=int(s), adjust=False, ignore_nulls=True).over(by_grp)
+                    ema = base.ewm_mean(span=int(s), adjust=False, ignore_nulls=True) \
+                             .over([*by_grp, "__streak_id"])
                     if cast_f32:
                         ema = ema.cast(pl.Float32)
                     ewm_exprs.append(ema.alias(f"{c}__ewm{s}"))
             lf_out = lf_out.with_columns(ewm_exprs)
 
-            # 清理临时列
-            lf_out = lf_out.drop([f"{c}__tminus1_base" for c in batch])
-
-
-    # C6 cross-section rank（可选）
+    # C6 截面 z/rank：**t-0 当期值**
     if cs_cols:
         cs_cols = [c for c in cs_cols if c in feature_cols]
         if cs_cols:
-
-            # TTL 掩码（t-1）
-            if prev_soft_days is not None:
-                last_date_1 = pl.col(g_date).shift(1).over(by_grp)
-                gap_1 = (pl.col(g_date) - last_date_1).cast(pl.Int32)
-                keep_1 = gap_1.is_not_null() & (gap_1 > 0) & (gap_1 <= pl.lit(int(prev_soft_days)))
-
-            # 先构造每列的 t-1 基准（含 TTL）
-            exprs_base = []
-            for c in cs_cols:
-                base = pl.col(c).shift(1).over(by_grp)
-                if prev_soft_days is not None:
-                    base = pl.when(keep_1).then(base).otherwise(None)
-                exprs_base.append(base.alias(f"{c}__tminus1_base"))
-            lf_out = lf_out.with_columns(exprs_base)
-
-            # 基于 t-1：截面 z 与 rank(0..1)
             cs_exprs = []
             for c in cs_cols:
-                base = pl.col(f"{c}__tminus1_base")
-
-                # 截面统计（只用该列的 t-1）
+                base = pl.col(c)  # t-0
                 n_valid = base.is_not_null().cast(pl.Int32).sum().over(by_cs)
                 mu      = base.mean().over(by_cs)
                 sig     = base.std(ddof=1).over(by_cs)
-
-                # z-score（数值更稳：sig.fill_null(0)+eps）
                 z = ((base - mu) / (sig.fill_null(0.0) + 1e-9)) \
                         .cast(pl.Float32 if cast_f32 else pl.Float64)
-
-                # 百分位排名：空→None；n=1→0.5
                 rank_raw = base.rank(method="average").over(by_cs)
                 csrank = pl.when(base.is_null()).then(None).otherwise(
                     pl.when(n_valid > 1)
-                    .then((rank_raw - 0.5) / n_valid.cast(pl.Float32))
-                    .otherwise(pl.lit(0.5))
+                      .then((rank_raw - 0.5) / n_valid.cast(pl.Float32))
+                      .otherwise(pl.lit(0.5))
                 ).cast(pl.Float32 if cast_f32 else pl.Float64)
-
                 cs_exprs += [z.alias(f"{c}__cs_z"), csrank.alias(f"{c}__csrank")]
-
             lf_out = lf_out.with_columns(cs_exprs)
 
-            # 清理临时列
-            lf_out = lf_out.drop([f"{c}__tminus1_base" for c in cs_cols])
+    # 清理连续性临时列
+    lf_out = lf_out.drop(["__gap1", "__streak_id"])
     return lf_out
+
 
    
 @dataclass
