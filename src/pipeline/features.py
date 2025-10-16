@@ -202,11 +202,7 @@ def fe_resp_same_tick_xday(
     add_prev1_multirep: bool = True,
     batch_size: int = 5,
 ) -> pl.LazyFrame:
-    """
-    按 (symbol_id, time_id) 分组，沿 date 方向做离散 lags 的“严格 d-k”跨日滞后与统计：
-      - 严格：仅当 (date_now - date_shifted) == k 时保留对应的 prev{k}
-      - mean/std/slope 统计均基于给定的 lags（忽略 null）
-    """
+
     g_symbol, g_date, g_time = keys
     if not lags:
         raise ValueError("`lags` 不能为空")
@@ -300,8 +296,6 @@ def fe_resp_same_tick_xday(
     # 6) 输出仍保持 (symbol, date, time) 升序
     lf_cur = lf_cur.sort([g_symbol, g_date, g_time])
     return lf_cur
-
-
 
 
 
