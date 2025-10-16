@@ -551,16 +551,20 @@ def fe_feat_history(
     lf_out = lf_out.drop(["__gap1", "__streak_id"])
     return lf_out
 
+from dataclasses import dataclass
+from typing import Sequence, Optional, Iterable
+import polars as pl
 
-   
+# -------- Stages configs --------
+
 @dataclass
 class StageA:
     tail_lags: Sequence[int]
     tail_diffs: Sequence[int]
     rolling_windows: Optional[Sequence[int]]
-    prev_soft_days: Optional[int] = None
     is_sorted: bool = False
     cast_f32: bool = True
+    # REMOVED: prev_soft_days  已在函数A中废弃
 
 @dataclass
 class StageB:
@@ -568,9 +572,9 @@ class StageB:
     stats_rep_cols: Optional[Sequence[str]] = None
     add_prev1_multirep: bool = True
     batch_size: int = 5
-    prev_soft_days: Optional[int] = None
     is_sorted: bool = False
     cast_f32: bool = True
+    # REMOVED: prev_soft_days  函数B本来也不需要
 
 # C 的每个操作可选；None / [] 表示跳过该操作
 @dataclass
@@ -582,13 +586,12 @@ class StageC:
     ewm_spans: Optional[Iterable[int]] = None
     cs_cols: Optional[Sequence[str]] = None
     keep_rmean_rstd: bool = True
-    prev_soft_days: Optional[int] = None
-    batch_size: Optional[int] = 10
+    batch_size: int = 10          # CHANGED: 不再 Optional，避免传 None
     is_sorted: bool = False
     cast_f32: bool = True
-    
+    # REMOVED: prev_soft_days  函数C已切换到严格自然日 + t-0
 
-
+# -------- Orchestrator --------
 
 def run_staged_engineering(
     lf_base: pl.LazyFrame,
@@ -608,17 +611,19 @@ def run_staged_engineering(
         if write_date_between is None:
             raise ValueError("write_date_between must be specified to avoid date overlap")
         lo, hi = write_date_between
-        
+
         sk = [g_date, g_time, g_symbol]
-        
-        df = lf_out.filter(pl.col(g_date).is_between(lo, hi)).sort(sk).collect()
-        with fs.open(path, "wb") as f:   # 复用你上面构好的 fs (fsspec)
+        df = (
+            lf_out
+            .filter(pl.col(g_date).is_between(lo, hi))
+            .sort(sk)
+            .collect()
+        )
+        with fs.open(path, "wb") as f:   # 依赖外部 fs (fsspec)
             df.write_parquet(f, compression="zstd")
-        if cfg.get("debug", {}).get("check_time_monotone", True):
+        if cfg.get("debug", {}).get("check_time_monotone", True):  # 依赖外部 cfg/断言函数
             assert_time_monotone(path, date_col=g_date, time_col=g_time)
 
-
-        
     # ---------- A ----------
     if A is not None:
         lf_resp = lf_base.select([*keys, *rep_cols])
@@ -627,16 +632,14 @@ def run_staged_engineering(
             keys=tuple(keys),
             rep_cols=rep_cols,
             is_sorted=A.is_sorted,
-            prev_soft_days=A.prev_soft_days,
             cast_f32=A.cast_f32,
             tail_lags=A.tail_lags,
             tail_diffs=A.tail_diffs,
             rolling_windows=A.rolling_windows,
-        )
+        )  # REMOVED: prev_soft_days
         drop = set(keys) | set(rep_cols)
         a_cols = [c for c in lf_a_full.collect_schema().names() if c not in drop]
         _save(lf_a_full.select([*keys, *a_cols]), f"{out_dir}/stage_a.parquet")
-        
 
     # ---------- B ----------
     if B is not None:
@@ -645,7 +648,7 @@ def run_staged_engineering(
             lf_resp,
             keys=tuple(keys),
             rep_cols=rep_cols,
-            lags=B.lags,                        # ← 只用离散 lags
+            lags=B.lags,                        # ← 只用离散 lags（严格 d-k 已在函数里处理）
             is_sorted=B.is_sorted,
             cast_f32=B.cast_f32,
             stats_rep_cols=B.stats_rep_cols,
@@ -656,7 +659,6 @@ def run_staged_engineering(
         b_cols = [c for c in lf_b_full.collect_schema().names() if c not in drop]
         _save(lf_b_full.select([*keys, *b_cols]), f"{out_dir}/stage_b.parquet")
 
-
     # ---------- C（按操作分别输出） ----------
     if C is not None:
         def _do_op(op_name: str, **op_flags):
@@ -666,7 +668,6 @@ def run_staged_engineering(
                 keys=tuple(keys),
                 feature_cols=feature_cols,
                 is_sorted=C.is_sorted,
-                prev_soft_days=C.prev_soft_days,
                 cast_f32=C.cast_f32,
                 batch_size=C.batch_size,
                 lags=op_flags.get("lags"),
@@ -676,7 +677,7 @@ def run_staged_engineering(
                 ewm_spans=op_flags.get("ewm_spans"),
                 keep_rmean_rstd=C.keep_rmean_rstd,
                 cs_cols=op_flags.get("cs_cols"),
-            ).drop(feature_cols)
+            ).drop(feature_cols)  # 输出只包含派生列
             cols = [c for c in lf_c.collect_schema().names() if c not in keys]
             _save(lf_c.select([*keys, *cols]), f"{out_dir}/stage_c_{op_name}.parquet")
 
@@ -686,4 +687,3 @@ def run_staged_engineering(
         if C.rz_windows:   _do_op("rz",     rz_windows=C.rz_windows)
         if C.ewm_spans:    _do_op("ewm",    ewm_spans=C.ewm_spans)
         if C.cs_cols:      _do_op("csrank", cs_cols=C.cs_cols)
-        
