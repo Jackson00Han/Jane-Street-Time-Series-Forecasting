@@ -90,7 +90,7 @@ def main():
         )
 
         out_dir = azify(f"{fe_root}/fe_{core_lo:04d}_{core_hi:04d}")
-        ensure_dir_az(out_dir)
+        ensure_dir_az(out_dir)     
 
         print(f"[FE] build {out_dir}  (pad:{pad_lo} → core:{core_lo}..{core_hi})")
         run_staged_engineering(

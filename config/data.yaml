@@ -45,8 +45,8 @@ paths:
   tmp:          "tmp"
 
   fs_mm_prefix: "/mnt/data/js/exp/v1/fs_mm/full_sample_v1"
-  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1300-1500__cv3-g7-r4__seed42__top1000__1760299442.txt"
-  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1300-1500__cv3-g7-r4__seed42__top1000__1760299442__range1000-1600"
+  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1400-1600__cv2-g7-r4__seed42__top1000__1760734398.txt"
+  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1400-1600__cv2-g7-r4__seed42__top1000__1760734398__range1000-1600"
 
 # 关键列与目标
 keys: ["symbol_id", "date_id", "time_id"]
@@ -66,19 +66,19 @@ dates:
 
   fe_dates:
     date_lo: 800
-    date_hi: 831
+    date_hi: 1600
 
   panel_dates:
-    date_lo: 800
+    date_lo: 830
     date_hi: 1600
 
   mfs_dates:
-    date_lo: 1200
+    date_lo: 1400
     date_hi: 1600
 
   fs_dates:
-    date_lo: 1300
-    date_hi: 1500
+    date_lo: 1400
+    date_hi: 1600
 
   mtrain_dates:
     date_lo: 1000

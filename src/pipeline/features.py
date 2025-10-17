@@ -6,7 +6,7 @@ import polars as pl
 import numpy as np
 from pipeline.io import cfg, fs, storage_options, P
 from pipeline.validate import assert_time_monotone
-
+import pandas as pd 
 
 # 特征工程
 
@@ -55,9 +55,8 @@ from pipeline.validate import assert_time_monotone
 #
 # 同样的列会对 "responder_6" 生成一遍。
 
-import polars as pl
-from typing import Tuple, Sequence, Optional
 
+#### Function A #####
 def fe_resp_daily(
     lf: pl.LazyFrame,
     *,
@@ -70,22 +69,22 @@ def fe_resp_daily(
     rolling_windows: Sequence[int] | None = (3,),
 ) -> pl.LazyFrame:
     """
-    日级特征工程（最小必要版）：
-      1) 对每个 (symbol, date) 统计：当日尾部倒序值、日收/均/方差，派生 dK、overnight、跨日 rolling；
-      2) 将“当日量”转为“对 d 生效”（严格相邻自然日的 shift(1)）；
-      3) 按 (symbol, date) 左连回 tick 级。
+    日级特征工程（稳定版）：
+      - tick→day 聚合在 Polars；
+      - gap/streak + 分段 rolling 在 pandas（避免 Polars Lazy 的窗口下推冲突）；
+      - 再回到 Polars Lazy 做 shift 与回拼。
     """
     g_symbol, g_date, g_time = keys
 
-    # 0) 输入排序（保障后续 over/rolling 等时序操作正确）
+    # ---------- 0) 输入排序（tick级） ----------
     if not is_sorted:
         lf = lf.sort([g_symbol, g_date, g_time])
 
-    # 1) 当日聚合（尾部倒序 + 当日统计）
+    # ---------- 1) 日内聚合（Polars） ----------
     need_L = sorted(set(tail_lags) | {k + 1 for k in tail_diffs} | {1})
     agg_exprs: list[pl.Expr] = []
     for r in rep_cols:
-        # 当日内按 time 排序后的倒数第 L（长度不足 L → null）
+        # 当日按 time 排序后的倒数第 L
         for L in need_L:
             agg_exprs.append(
                 pl.when(pl.len() >= L)
@@ -93,125 +92,109 @@ def fe_resp_daily(
                   .otherwise(None)
                   .alias(f"{r}_prev_tail_lag{L}")
             )
-        # 显式当日统计
+        # 当日统计
         agg_exprs += [
             pl.col(r).sort_by(pl.col(g_time)).last().alias(f"{r}_prevday_close"),
             pl.col(r).mean().alias(f"{r}_prevday_mean"),
             pl.col(r).std(ddof=1).alias(f"{r}_prevday_std"),
         ]
 
-    daily = (
+    daily_pl = (
         lf.group_by([g_symbol, g_date])
           .agg(agg_exprs)
-          .sort([g_symbol, g_date])   # 保障 over(g_symbol) 的时序正确
+          .sort([g_symbol, g_date])
+          .collect(streaming=False)   # 小表物化（稳定）
     )
 
-################************************************################
-    # 添加两个关键列，把“是否相邻自然日”和“连续区间”显式化, 若想放宽条件，把gap1 调成为自己可接受的区间即可，如 gap1 <=5, 并修改下面的相应几个位置
-    prev_day = pl.col(g_date).shift(1).over(g_symbol)
-    gap1 = (pl.col(g_date) - prev_day).cast(pl.Int32)
+    # ---------- 2) gap / streak + rolling（pandas） ----------
+    daily = daily_pl.to_pandas()           # 行数≈symbol×days，足够小
+    daily.sort_values([g_symbol, g_date], inplace=True)
 
-    # 断档：gap != 1 的地方开新段；用累计和得到“连续段 id”
-    streak_id = pl.when(gap1.fill_null(1) != 1).then(1).otherwise(0).cum_sum().over(g_symbol).alias("__streak_id")
-    daily = daily.with_columns([gap1.alias("__gap1"), streak_id])
-################************************************################   
-    
-    # 2) 当日派生：dK（last - 倒数第 K+1）
-    daily = daily.with_columns([
-        (pl.col(f"{r}_prev_tail_lag1") - pl.col(f"{r}_prev_tail_lag{K+1}")).alias(f"{r}_prev_tail_d{K}")
-        for r in rep_cols for K in tail_diffs
-    ])
+    # gap1（相邻自然日=1）；自动适配 date_id 类型（整数天 or datetime）
+    gap1 = daily.groupby(g_symbol, sort=False)[g_date].diff().fillna(1).astype(np.int32)
 
-    # 3) 跨日衍生：prev2day / overnight / close-mean
+    daily["__gap1"] = gap1
+    daily["__streak_id"] = (gap1 != 1).groupby(daily[g_symbol]).cumsum().astype(np.int32)
 
-    daily = (
-        daily.with_columns([
-            # 只有 gap==1 才认“昨天”
-            pl.when(pl.col("__gap1") == 1)
-            .then(pl.col(f"{r}_prevday_close").shift(1).over(g_symbol))
-            .otherwise(None)
-            .alias(f"{r}_prev2day_close")
-            for r in rep_cols
-        ])
-        .with_columns(
-            [
-                (pl.col(f"{r}_prevday_close") - pl.col(f"{r}_prevday_mean")).alias(f"{r}_prevday_close_minus_mean")
-                for r in rep_cols
-            ] + [
-                # 如果不是严格“昨天”，overnight 置空
-                (pl.col(f"{r}_prevday_close") - pl.col(f"{r}_prev2day_close")).alias(f"{r}_overnight_gap")
-                for r in rep_cols
-            ]
-        )
-    )
+    # —— 批量构造需要新增的列，避免一列一列插入造成碎片化 —— #
+    add_cols: dict[str, pd.Series] = {}
 
+    # 2.1 dK: prev_tail_lag1 - prev_tail_lag{K+1}
+    for r in rep_cols:
+        for K in tail_diffs:
+            col = (daily[f"{r}_prev_tail_lag1"] - daily[f"{r}_prev_tail_lag{K+1}"])
+            add_cols[f"{r}_prev_tail_d{K}"] = col.astype(np.float32 if cast_f32 else np.float64)
 
-    # 4) 跨日 rolling（以当日收盘 close 为基）——用分段累加+差分，避免 rolling_*().over(...)
-    if rolling_windows:
-        wins = sorted({int(w) for w in rolling_windows if int(w) > 1})
+    # 2.2 prev2day / overnight / close-mean
+    for r in rep_cols:
+        prev = daily.groupby(g_symbol, sort=False)[f"{r}_prevday_close"].shift(1)
+        prev2 = np.where(daily["__gap1"].values == 1, prev, np.nan)
+        add_cols[f"{r}_prev2day_close"] = pd.Series(prev2, index=daily.index) \
+            .astype(np.float32 if cast_f32 else np.float64)
 
-        # 在每个 (symbol, __streak_id) 段内生成递增行号 __rn（1..段长）
-        daily = daily.with_columns(
-            pl.int_range(1, pl.len() + 1).over([g_symbol, "__streak_id"]).alias("__rn")
-        )
+        add_cols[f"{r}_overnight_gap"] = (
+            daily[f"{r}_prevday_close"] - add_cols[f"{r}_prev2day_close"]
+        ).astype(np.float32 if cast_f32 else np.float64)
 
-        # 为每个 responder 预先构造分段累计和与平方累计和
-        prep_exprs = []
+        add_cols[f"{r}_prevday_close_minus_mean"] = (
+            daily[f"{r}_prevday_close"] - daily[f"{r}_prevday_mean"]
+        ).astype(np.float32 if cast_f32 else np.float64)
+
+    # 2.3 分段 rolling（按 (symbol, __streak_id) 组内重置）
+    wins = sorted({int(w) for w in (rolling_windows or []) if int(w) > 1})
+    if wins:
+        grp = daily.groupby([g_symbol, "__streak_id"], sort=False)
         for r in rep_cols:
-            base = pl.col(f"{r}_prevday_close")
-            prep_exprs += [
-                base.cum_sum().over([g_symbol, "__streak_id"]).alias(f"__cs_{r}"),
-                (base * base).cum_sum().over([g_symbol, "__streak_id"]).alias(f"__cs2_{r}"),
-            ]
-        daily = daily.with_columns(prep_exprs)
-
-        # 基于累计和做窗口差分，得到 mean/std（ddof=1；首 w-1 行使用更小样本数）
-        roll_exprs = []
-        rn = pl.col("__rn")
-        for r in rep_cols:
-            cs  = pl.col(f"__cs_{r}")
-            cs2 = pl.col(f"__cs2_{r}")
+            sgb = grp[f"{r}_prevday_close"]
             for w in wins:
-                n = pl.when(rn >= w).then(pl.lit(w)).otherwise(rn).cast(pl.Float32)
-                sum_w  = (cs  - cs.shift(w).over([g_symbol, "__streak_id"]))
-                sum2_w = (cs2 - cs2.shift(w).over([g_symbol, "__streak_id"]))
-                mean_w = (sum_w / n).alias(f"{r}_close_roll{w}_mean")
-                var_w  = (sum2_w - (sum_w * sum_w) / n) / (n - 1.0)
-                std_w  = pl.when(n >= 2.0).then(var_w.clip(0.0, None).sqrt()).otherwise(None) \
-                        .alias(f"{r}_close_roll{w}_std")
-                # 等价写法：var_w.clip(lower_bound=0.0)
+                mean_w = (
+                    sgb.rolling(window=w, min_periods=1).mean()
+                       .reset_index(level=[0, 1], drop=True)
+                )
+                std_w = (
+                    sgb.rolling(window=w, min_periods=2).std(ddof=1)
+                       .reset_index(level=[0, 1], drop=True)
+                )
+                if cast_f32:
+                    mean_w = mean_w.astype(np.float32)
+                    std_w  = std_w.astype(np.float32)
+                add_cols[f"{r}_close_roll{w}_mean"] = mean_w
+                add_cols[f"{r}_close_roll{w}_std"]  = std_w
 
-                roll_exprs += [mean_w, std_w]
+    # —— 一次性并入，避免碎片化；如需彻底整理，可最后再 .copy() —— #
+    if add_cols:
+        new_df = pd.DataFrame(add_cols, index=daily.index)
+        if cast_f32:
+            new_df = new_df.astype(np.float32, copy=False)
+        daily = pd.concat([daily, new_df], axis=1, copy=False)
 
-        daily = daily.with_columns(roll_exprs).drop(
-            ["__rn", *[f"__cs_{r}" for r in rep_cols], *[f"__cs2_{r}" for r in rep_cols]]
-        )
+    # ---------- 3) 回到 Polars Lazy，继续历史化与回拼 ----------
+    daily_pl2 = pl.from_pandas(daily, include_index=False).sort([g_symbol, g_date])
+    exclude = {g_symbol, g_date, "__gap1", "__streak_id"}
+    prev_cols = [c for c in daily_pl2.columns if c not in exclude]
 
-
-    # 5) 整体 shift(1)
-    all_cols = set(daily.collect_schema().names())
-    prev_cols = [
-        c for c in all_cols
-        if c not in (g_symbol, g_date, "__gap1", "__streak_id")
-    ]
-
-    hist_exprs = []
+    # 3.1 将“当日量”转为“对 d 生效”的历史值：严格相邻自然日 (gap1==1) 才承认昨天
+    hist_exprs: list[pl.Expr] = []
     for c in prev_cols:
         prev_val = pl.col(c).shift(1).over(g_symbol)
         resolved = pl.when(pl.col("__gap1") == 1).then(prev_val).otherwise(None)
         if cast_f32:
             resolved = resolved.cast(pl.Float32)
         hist_exprs.append(resolved.alias(c))
-        
-    daily_prev = daily.with_columns(hist_exprs).drop(["__gap1", "__streak_id"])
-    
-    
-    # 6) 回拼 tick 级并固定顺序
+
+    daily_prev = (
+        daily_pl2.lazy()
+                 .with_columns(hist_exprs)
+                 .drop(["__gap1", "__streak_id"])
+    )
+
+    # ---------- 4) 回拼 tick 级并固定顺序 ----------
     out = (
         lf.join(daily_prev, on=[g_symbol, g_date], how="left")
           .sort([g_symbol, g_date, g_time])
     )
     return out
+
 
 
 
@@ -403,7 +386,7 @@ def fe_feat_history(
     feature_cols: Sequence[str],
     is_sorted: bool = False,
     cast_f32: bool = True,
-    batch_size: int = 10,
+    batch_size: int = 30,          # ↑ 批次稍大，减少 with_columns 次数
     lags: Iterable[int] = (1, 3),
     ret_periods: Iterable[int] = (1,),
     diff_periods: Iterable[int] = (1,),
@@ -412,20 +395,10 @@ def fe_feat_history(
     keep_rmean_rstd: bool = True,
     cs_cols: Optional[Sequence[str]] = None,
 ) -> pl.LazyFrame:
-    """
-    协变量（feature0..N）的时序衍生（与 A/B 同风格，且 rolling/截面用 t-0）：
-      - 严格自然日 k 日滞后（__lag{k}）：仅当 (date_now - date_shifted) == k 才保留
-      - returns / diffs 基于“严格 lag”
-      - rolling / EWM 使用 **t-0 当期值**，并在“连续段”内计算（断档处重置）
-      - 截面 z / rank 使用 **t-0 当期值**，按 (date, time) 横截面计算
-    注意：date_id 应为“自然日序号”（相邻自然日差为 1），不是 YYYYMMDD 原样数。
-    """
-
     g_sym, g_date, g_time = keys
-    by_grp = [g_sym]            # 组内：沿 date 的时序运算
-    by_cs  = [g_date, g_time]   # 截面：同一时点 (date, time)
+    by_grp = [g_sym]
+    by_cs  = [g_date, g_time]
 
-    # --- 校验 + 排序 ---
     need_cols = [*keys, *feature_cols]
     schema = lf.collect_schema().names()
     miss = [c for c in need_cols if c not in schema]
@@ -435,11 +408,6 @@ def fe_feat_history(
     lf_out = lf.select(need_cols)
     if not is_sorted:
         lf_out = lf_out.sort(list(keys))
-
-    # 小工具
-    def _chunks(lst, k):
-        for i in range(0, len(lst), k):
-            yield lst[i:i+k]
 
     def _clean_pos_sorted_unique(x):
         if not x:
@@ -452,131 +420,149 @@ def fe_feat_history(
     RZW    = _clean_pos_sorted_unique(rz_windows)
     SPANS  = _clean_pos_sorted_unique(ewm_spans)
 
-    # === 连续性分段：严格自然日（gap==1 连续；gap!=1 断档）===
-    prev_day  = pl.col(g_date).shift(1).over(by_grp)
-    gap1      = (pl.col(g_date) - prev_day).cast(pl.Int32).alias("__gap1")
-    streak_id = (
-        pl.when(pl.col("__gap1").fill_null(1) != 1).then(1).otherwise(0)
-          .cum_sum().over(by_grp)
-          .alias("__streak_id")
-    )
-    lf_out = lf_out.with_columns([gap1, streak_id])
+    # --- 0) gap/streak（两步，避免并行求值依赖） ---
+    prev_day = pl.col(g_date).shift(1).over(by_grp)
+    gap1 = (pl.col(g_date) - prev_day).cast(pl.Int32).alias("__gap1")
+    lf_out = lf_out.with_columns(gap1)
 
-    # C1 严格自然日 lag：只接受 gap_k == k
+    streak_id = ((pl.col("__gap1").fill_null(1) != 1).cast(pl.Int32).cum_sum().over(by_grp).alias("__streak_id"))
+    lf_out = lf_out.with_columns(streak_id)
+
+    # --- 1) 预计算所有会用到的 keep_k 掩码（只算一次） ---
+    need_k = set(LAGS)
+    need_k |= set(k for k in K_RET if k not in LAGS)
+    need_k |= set(k for k in K_DIFF if k not in LAGS)
+    need_k = sorted({int(k) for k in need_k if int(k) >= 1})
+
+    keep_exprs = []
+    for k in need_k:
+        last_date_k = pl.col(g_date).shift(k).over(by_grp)
+        gap_k = (pl.col(g_date) - last_date_k).cast(pl.Int32)
+        keep_k = (gap_k.is_not_null() & (gap_k == k)).alias(f"__keep{int(k)}")
+        keep_exprs.append(keep_k)
+    if keep_exprs:
+        lf_out = lf_out.with_columns(keep_exprs)
+
+    # 小工具：按批取列
+    def _chunks(lst, b):
+        for i in range(0, len(lst), b):
+            yield lst[i:i+b]
+
+    # --- 2) 严格日 lag ---
     if LAGS:
         for batch in _chunks(feature_cols, batch_size):
             exprs = []
             for L in LAGS:
-                last_date_L = pl.col(g_date).shift(L).over(by_grp)
-                gap_L = (pl.col(g_date) - last_date_L).cast(pl.Int32)
-                keep_L = gap_L.is_not_null() & (gap_L == L)
+                keepL = pl.col(f"__keep{int(L)}")
                 for c in batch:
-                    e = pl.when(keep_L).then(pl.col(c).shift(L).over(by_grp)).otherwise(None)
-                    if cast_f32:
-                        e = e.cast(pl.Float32)
+                    e = pl.when(keepL).then(pl.col(c).shift(L).over(by_grp)).otherwise(None)
+                    if cast_f32: e = e.cast(pl.Float32)
                     exprs.append(e.alias(f"{c}__lag{L}"))
             lf_out = lf_out.with_columns(exprs)
 
-    # C2 returns：基于严格 lag（分母近 0 置空）
+    # --- 3) returns ---
     if K_RET:
         for batch in _chunks(feature_cols, batch_size):
             exprs = []
             for c in batch:
-                cur = pl.col(c)  # t-0
+                cur = pl.col(c)
                 for k in K_RET:
                     if k in LAGS:
-                        prev = pl.col(f"{c}__lag{k}")   # 已是严格 lag
+                        prev = pl.col(f"{c}__lag{k}")
                     else:
-                        last_date_k = pl.col(g_date).shift(k).over(by_grp)
-                        gap_k = (pl.col(g_date) - last_date_k).cast(pl.Int32)
-                        keep_k = gap_k.is_not_null() & (gap_k == k)
-                        prev = pl.when(keep_k).then(pl.col(c).shift(k).over(by_grp)).otherwise(None)
+                        keepk = pl.col(f"__keep{int(k)}")
+                        prev = pl.when(keepk).then(pl.col(c).shift(k).over(by_grp)).otherwise(None)
                     ret = pl.when(prev.is_not_null() & (prev.abs() > 1e-12)).then(cur / prev - 1.0).otherwise(None)
-                    if cast_f32:
-                        ret = ret.cast(pl.Float32)
+                    if cast_f32: ret = ret.cast(pl.Float32)
                     exprs.append(ret.alias(f"{c}__ret{k}"))
             lf_out = lf_out.with_columns(exprs)
 
-    # C3 diffs：基于严格 lag
+    # --- 4) diffs ---
     if K_DIFF:
         for batch in _chunks(feature_cols, batch_size):
             exprs = []
             for c in batch:
-                cur = pl.col(c)  # t-0
+                cur = pl.col(c)
                 for k in K_DIFF:
                     if k in LAGS:
-                        prevk = pl.col(f"{c}__lag{k}")  # 严格 lag
+                        prevk = pl.col(f"{c}__lag{k}")
                     else:
-                        last_date_k = pl.col(g_date).shift(k).over(by_grp)
-                        gap_k = (pl.col(g_date) - last_date_k).cast(pl.Int32)
-                        keep_k = gap_k.is_not_null() & (gap_k == k)
-                        prevk = pl.when(keep_k).then(pl.col(c).shift(k).over(by_grp)).otherwise(None)
+                        keepk = pl.col(f"__keep{int(k)}")
+                        prevk = pl.when(keepk).then(pl.col(c).shift(k).over(by_grp)).otherwise(None)
                     d = pl.when(prevk.is_not_null()).then(cur - prevk).otherwise(None)
-                    if cast_f32:
-                        d = d.cast(pl.Float32)
+                    if cast_f32: d = d.cast(pl.Float32)
                     exprs.append(d.alias(f"{c}__diff{k}"))
             lf_out = lf_out.with_columns(exprs)
 
-    # C4 rolling r-z：段内滚动，**t-0 当期值**
-    if RZW:
-        for batch in _chunks(feature_cols, batch_size):
-            roll_exprs = []
-            for c in batch:
-                base = pl.col(c)  # t-0
-                for w in RZW:
-                    m  = base.rolling_mean(window_size=w, min_samples=1).over([*by_grp, "__streak_id"])
-                    s  = base.rolling_std(window_size=w, ddof=1, min_samples=2).over([*by_grp, "__streak_id"])
-                    rz = (base - m) / (s.fill_null(0.0) + 1e-9)
-                    if cast_f32:
-                        m = m.cast(pl.Float32); s = s.cast(pl.Float32); rz = rz.cast(pl.Float32)
-                    if keep_rmean_rstd:
-                        roll_exprs += [
-                            m.alias(f"{c}__rmean{w}"),
-                            s.alias(f"{c}__rstd{w}"),
-                            rz.alias(f"{c}__rz{w}"),
-                        ]
-                    else:
-                        roll_exprs.append(rz.alias(f"{c}__rz{w}"))
-            lf_out = lf_out.with_columns(roll_exprs)
+# --- 5) rolling r-z（组内一次性做，避免大量 over）---
+    use_rz = bool(RZW)
+    use_ewm = bool(SPANS)
+    if use_rz or use_ewm:
+        group_cols = [g_sym, "__streak_id"]
+        # 5a) rolling r-mean / r-std / rz（t-0 当期值）
+        if use_rz:
+            wins = sorted({int(w) for w in RZW if int(w) > 0})
+            for batch in _chunks(feature_cols, batch_size):
+                exprs = []
+                for c in batch:
+                    for w in wins:
+                        rmean_expr = pl.col(c).rolling_mean(window_size=w, min_periods=1).over(group_cols)
+                        rstd_expr = pl.col(c).rolling_std(window_size=w, min_periods=2).over(group_cols)
+                        rz_expr = ((pl.col(c) - rmean_expr) / (rstd_expr.fill_null(0.0) + 1e-9))
+                        if cast_f32:
+                            rz_expr = rz_expr.cast(pl.Float32)
+                        exprs.append(rz_expr.alias(f"{c}__rz{w}"))
+                        if keep_rmean_rstd:
+                            if cast_f32:
+                                rmean_expr = rmean_expr.cast(pl.Float32)
+                                rstd_expr = rstd_expr.cast(pl.Float32)
+                            exprs.append(rmean_expr.alias(f"{c}__rmean{w}"))
+                            exprs.append(rstd_expr.alias(f"{c}__rstd{w}"))
+                lf_out = lf_out.with_columns(exprs)
 
-    # C5 EWM：段内计算，**t-0 当期值**
-    if SPANS:
-        for batch in _chunks(feature_cols, batch_size):
-            ewm_exprs = []
-            for c in batch:
-                base = pl.col(c)  # t-0
-                for s in SPANS:
-                    ema = base.ewm_mean(span=int(s), adjust=False, ignore_nulls=True) \
-                             .over([*by_grp, "__streak_id"])
-                    if cast_f32:
-                        ema = ema.cast(pl.Float32)
-                    ewm_exprs.append(ema.alias(f"{c}__ewm{s}"))
-            lf_out = lf_out.with_columns(ewm_exprs)
+        # --- 6) EWM（t-0 当期值；段内重置） ---
+        if use_ewm:
+            spans = sorted({int(s) for s in SPANS if int(s) > 0})
+            for batch in _chunks(feature_cols, batch_size):
+                exprs = []
+                for c in batch:
+                    for s in spans:
+                        ema_expr = pl.col(c).ewm_mean(span=s, adjust=False, min_periods=1, ignore_nulls=True).over(group_cols)
+                        if cast_f32:
+                            ema_expr = ema_expr.cast(pl.Float32)
+                        exprs.append(ema_expr.alias(f"{c}__ewm{s}"))
+                lf_out = lf_out.with_columns(exprs)
 
-    # C6 截面 z/rank：**t-0 当期值**
+        
+
+                    
+
+    # --- 7) 截面 z / rank（保留 over，但合并成一次 with_columns） ---
     if cs_cols:
         cs_cols = [c for c in cs_cols if c in feature_cols]
         if cs_cols:
-            cs_exprs = []
+            exprs = []
             for c in cs_cols:
-                base = pl.col(c)  # t-0
+                base = pl.col(c)
                 n_valid = base.is_not_null().cast(pl.Int32).sum().over(by_cs)
                 mu      = base.mean().over(by_cs)
                 sig     = base.std(ddof=1).over(by_cs)
-                z = ((base - mu) / (sig.fill_null(0.0) + 1e-9)) \
-                        .cast(pl.Float32 if cast_f32 else pl.Float64)
+                z = ((base - mu) / (sig.fill_null(0.0) + 1e-9)).cast(pl.Float32 if cast_f32 else pl.Float64)
                 rank_raw = base.rank(method="average").over(by_cs)
                 csrank = pl.when(base.is_null()).then(None).otherwise(
                     pl.when(n_valid > 1)
                       .then((rank_raw - 0.5) / n_valid.cast(pl.Float32))
                       .otherwise(pl.lit(0.5))
                 ).cast(pl.Float32 if cast_f32 else pl.Float64)
-                cs_exprs += [z.alias(f"{c}__cs_z"), csrank.alias(f"{c}__csrank")]
-            lf_out = lf_out.with_columns(cs_exprs)
+                exprs += [z.alias(f"{c}__cs_z"), csrank.alias(f"{c}__csrank")]
+            lf_out = lf_out.with_columns(exprs)
 
-    # 清理连续性临时列
-    lf_out = lf_out.drop(["__gap1", "__streak_id"])
+    # --- 8) 清理临时列 ---
+    drops = ["__gap1", "__streak_id", *[f"__keep{int(k)}" for k in need_k]]
+    keep = [c for c in lf_out.collect_schema().names() if c not in drops]
+    lf_out = lf_out.select(keep)
     return lf_out
+
 
 from dataclasses import dataclass
 from typing import Sequence, Optional, Iterable
