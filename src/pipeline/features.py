@@ -379,6 +379,7 @@ def fe_resp_same_tick_xday(
 import polars as pl
 from typing import Tuple, Sequence, Optional, Iterable
 
+# C
 def fe_feat_history(
     *,
     lf: pl.LazyFrame,
@@ -395,10 +396,35 @@ def fe_feat_history(
     keep_rmean_rstd: bool = True,
     cs_cols: Optional[Sequence[str]] = None,
 ) -> pl.LazyFrame:
-    g_sym, g_date, g_time = keys
-    by_grp = [g_sym]
-    by_cs  = [g_date, g_time]
+    """
 
+    总体思路：
+    - 先用 __streak_id 把“日期不连续”的地方（周末/停牌/断档）切成独立段；
+      此后所有 step/rolling/ewm 都在 over([symbol_id, __streak_id]) 的**段内连续序列**上计算，
+      允许跨日，但绝不跨“缺口”，保证时序语义稳定。
+    - 你已有 time_pos / time_sin / time_cos，日界限的节律由这些特征承担，这里不额外干预。
+
+    产出特征（按模块）：
+    A) Step（段内）：
+       - {c}__lag{k}   : x[t-k]
+       - {c}__diff{k}  : x[t] - x[t-k]
+       - {c}__ret{k}   : x[t]/x[t-k] - 1，分母 |x[t-k]| ≤ eps → None，随后对称裁剪到 [-10, 10]
+       - {c}__rmean{w} : 最近 w 个“时间步”的均值（min_periods=1）
+       - {c}__rstd{w}  : 最近 w 个“时间步”的标准差（min_periods=2）
+       - {c}__rz{w}    : (x - rmean) / rstd；仅在 rstd > eps 时给值
+       - {c}__ewm{s}   : 指数加权均值（span=s, adjust=False, ignore_nulls=True）
+    B) Cross-sectional（同一时刻的横截面）：
+       - {c}__cs_z     : 在 (date_id, time_id) 截面上的 z-score（sig > eps 时有效）
+       - {c}__csrank   : 在该截面内的分位（平均秩 / n；有效样本<2 → 0.5；缺失保持缺失）
+
+    工程要点：
+    - 仅使用 ≤t 已知信息；缺失交由 LGBM 处理（必要时你可另加 isna 指示）。
+    - window 的单位是“时间步”（按 (date,time) 排序后的行），不是自然日。
+    - 为避免过度 with_columns，按 batch 生成。
+    """ 
+    g_sym, g_date, g_time = keys
+    
+    # ========== 基本校验与排序 ==========
     need_cols = [*keys, *feature_cols]
     schema = lf.collect_schema().names()
     miss = [c for c in need_cols if c not in schema]
@@ -408,7 +434,8 @@ def fe_feat_history(
     lf_out = lf.select(need_cols)
     if not is_sorted:
         lf_out = lf_out.sort(list(keys))
-
+        
+    # 参数清洗
     def _clean_pos_sorted_unique(x):
         if not x:
             return tuple()
@@ -420,145 +447,138 @@ def fe_feat_history(
     RZW    = _clean_pos_sorted_unique(rz_windows)
     SPANS  = _clean_pos_sorted_unique(ewm_spans)
 
-    # --- 0) gap/streak（两步，避免并行求值依赖） ---
-    prev_day = pl.col(g_date).shift(1).over(by_grp)
-    gap1 = (pl.col(g_date) - prev_day).cast(pl.Int32).alias("__gap1")
+    # ========== 0) gap / streak ==========
+    # 同一 symbol 内，prev_row_date 与当前 date 的差：
+    # 同日=0，邻日=1，缺口>1。仅在 gap>1 时启动新段（__streak_id 累加）。
+
+    prev_row_date = pl.col(g_date).shift(1).over([g_sym])
+    gap1 = (pl.col(g_date) - prev_row_date).cast(pl.Int32).alias("__gap1") # 同日 为0， 邻日为1， 非邻日为>1
     lf_out = lf_out.with_columns(gap1)
-
-    streak_id = ((pl.col("__gap1").fill_null(1) != 1).cast(pl.Int32).cum_sum().over(by_grp).alias("__streak_id"))
-    lf_out = lf_out.with_columns(streak_id)
-
-    # --- 1) 预计算所有会用到的 keep_k 掩码（只算一次） ---
-    need_k = set(LAGS)
-    need_k |= set(k for k in K_RET if k not in LAGS)
-    need_k |= set(k for k in K_DIFF if k not in LAGS)
-    need_k = sorted({int(k) for k in need_k if int(k) >= 1})
-
-    keep_exprs = []
-    for k in need_k:
-        last_date_k = pl.col(g_date).shift(k).over(by_grp)
-        gap_k = (pl.col(g_date) - last_date_k).cast(pl.Int32)
-        keep_k = (gap_k.is_not_null() & (gap_k == k)).alias(f"__keep{int(k)}")
-        keep_exprs.append(keep_k)
-    if keep_exprs:
-        lf_out = lf_out.with_columns(keep_exprs)
-
+    
+    reset_seg = pl.when(pl.col("__gap1").is_null()).then(0).otherwise((pl.col("__gap1") > 1).cast(pl.Int32))
+    streak_id = reset_seg.cum_sum().over([g_sym]).alias("__streak_id")
+    lf_out = lf_out.with_columns(streak_id).drop("__gap1")
+    
+    by_sym_streak = [g_sym, "__streak_id"]
+    
     # 小工具：按批取列
     def _chunks(lst, b):
         for i in range(0, len(lst), b):
             yield lst[i:i+b]
-
-    # --- 2) 严格日 lag ---
+    # =========================
+    # 1) Step 序列特征（by symbol）
+    # =========================
+    # lag
     if LAGS:
         for batch in _chunks(feature_cols, batch_size):
             exprs = []
-            for L in LAGS:
-                keepL = pl.col(f"__keep{int(L)}")
-                for c in batch:
-                    e = pl.when(keepL).then(pl.col(c).shift(L).over(by_grp)).otherwise(None)
-                    if cast_f32: e = e.cast(pl.Float32)
-                    exprs.append(e.alias(f"{c}__lag{L}"))
-            lf_out = lf_out.with_columns(exprs)
-
-    # --- 3) returns ---
-    if K_RET:
-        for batch in _chunks(feature_cols, batch_size):
-            exprs = []
             for c in batch:
-                cur = pl.col(c)
-                for k in K_RET:
-                    if k in LAGS:
-                        prev = pl.col(f"{c}__lag{k}")
-                    else:
-                        keepk = pl.col(f"__keep{int(k)}")
-                        prev = pl.when(keepk).then(pl.col(c).shift(k).over(by_grp)).otherwise(None)
-                    ret = pl.when(prev.is_not_null() & (prev.abs() > 1e-12)).then(cur / prev - 1.0).otherwise(None)
-                    if cast_f32: ret = ret.cast(pl.Float32)
-                    exprs.append(ret.alias(f"{c}__ret{k}"))
+                base = pl.col(c)
+                for lag in LAGS:
+                    v = base.shift(lag).over(by_sym_streak)
+                    if cast_f32: v = v.cast(pl.Float32)
+                    exprs.append(v.alias(f"{c}__lag{lag}"))
             lf_out = lf_out.with_columns(exprs)
-
-    # --- 4) diffs ---
+            
+                    
+                    
+    # diff
     if K_DIFF:
         for batch in _chunks(feature_cols, batch_size):
             exprs = []
             for c in batch:
-                cur = pl.col(c)
-                for k in K_DIFF:
-                    if k in LAGS:
-                        prevk = pl.col(f"{c}__lag{k}")
-                    else:
-                        keepk = pl.col(f"__keep{int(k)}")
-                        prevk = pl.when(keepk).then(pl.col(c).shift(k).over(by_grp)).otherwise(None)
-                    d = pl.when(prevk.is_not_null()).then(cur - prevk).otherwise(None)
-                    if cast_f32: d = d.cast(pl.Float32)
-                    exprs.append(d.alias(f"{c}__diff{k}"))
+                base = pl.col(c)
+                for d in K_DIFF:
+                    prev = base.shift(d).over(by_sym_streak)
+                    diff = base - prev
+                    if cast_f32: diff = diff.cast(pl.Float32)
+                    exprs.append(diff.alias(f"{c}__diff{d}"))
             lf_out = lf_out.with_columns(exprs)
+    
+    # ret（分母保护 + 对称裁剪）
 
-# --- 5) rolling r-z（组内一次性做，避免大量 over）---
-    use_rz = bool(RZW)
-    use_ewm = bool(SPANS)
-    if use_rz or use_ewm:
-        group_cols = [g_sym, "__streak_id"]
-        # 5a) rolling r-mean / r-std / rz（t-0 当期值）
-        if use_rz:
-            wins = sorted({int(w) for w in RZW if int(w) > 0})
-            for batch in _chunks(feature_cols, batch_size):
-                exprs = []
-                for c in batch:
-                    for w in wins:
-                        rmean_expr = pl.col(c).rolling_mean(window_size=w, min_periods=1).over(group_cols)
-                        rstd_expr = pl.col(c).rolling_std(window_size=w, min_periods=2).over(group_cols)
-                        rz_expr = ((pl.col(c) - rmean_expr) / (rstd_expr.fill_null(0.0) + 1e-9))
+    if K_RET:
+        eps = pl.lit(1e-12)
+        ret_cap = 10.0 # 防极端值裁剪
+        for batch in _chunks(feature_cols, batch_size):
+            exprs = []
+            for c in batch:
+                base = pl.col(c)
+                for r in K_RET:
+                    prev = base.shift(r).over([g_sym, "__streak_id"])
+                    ret = pl.when(prev.is_not_null() & (prev.abs() > eps)).then((base / prev) - 1.0).otherwise(None)                    
+                    if cast_f32: ret = ret.cast(pl.Float32)
+                    ret = ret.clip(-ret_cap, ret_cap)
+                    exprs.append(ret.alias(f"{c}__ret{r}"))
+            lf_out = lf_out.with_columns(exprs)
+    
+    # rolling r-mean / r-std / rz（t-0 当期值）
+    
+    if RZW:
+        eps_std = pl.lit(1e-9)
+        wins = sorted({int(w) for w in RZW if int(w) > 0})
+        for batch in _chunks(feature_cols, batch_size):
+            exprs = []
+            for c in batch:
+                base = pl.col(c)
+                for w in wins:
+                    rmean_expr = base.rolling_mean(window_size=w, min_periods=1).over(by_sym_streak)
+                    rstd_expr = base.rolling_std(window_size=w, min_periods=2).over(by_sym_streak)
+                    rz_expr = pl.when(rstd_expr.is_not_null() & (rstd_expr > eps_std)).then(
+                        (pl.col(c) - rmean_expr) / (rstd_expr + eps_std)
+                    ).otherwise(None)
+                    if keep_rmean_rstd:
                         if cast_f32:
-                            rz_expr = rz_expr.cast(pl.Float32)
-                        exprs.append(rz_expr.alias(f"{c}__rz{w}"))
-                        if keep_rmean_rstd:
-                            if cast_f32:
-                                rmean_expr = rmean_expr.cast(pl.Float32)
-                                rstd_expr = rstd_expr.cast(pl.Float32)
-                            exprs.append(rmean_expr.alias(f"{c}__rmean{w}"))
-                            exprs.append(rstd_expr.alias(f"{c}__rstd{w}"))
-                lf_out = lf_out.with_columns(exprs)
+                            rmean_expr = rmean_expr.cast(pl.Float32)
+                            rstd_expr = rstd_expr.cast(pl.Float32)
+                        exprs.append(rmean_expr.alias(f"{c}__rmean{w}"))
+                        exprs.append(rstd_expr.alias(f"{c}__rstd{w}"))         
+                    if cast_f32:
+                        rz_expr = rz_expr.cast(pl.Float32)
+                    exprs.append(rz_expr.alias(f"{c}__rz{w}"))
 
-        # --- 6) EWM（t-0 当期值；段内重置） ---
-        if use_ewm:
-            spans = sorted({int(s) for s in SPANS if int(s) > 0})
-            for batch in _chunks(feature_cols, batch_size):
-                exprs = []
-                for c in batch:
-                    for s in spans:
-                        ema_expr = pl.col(c).ewm_mean(span=s, adjust=False, min_periods=1, ignore_nulls=True).over(group_cols)
-                        if cast_f32:
-                            ema_expr = ema_expr.cast(pl.Float32)
-                        exprs.append(ema_expr.alias(f"{c}__ewm{s}"))
-                lf_out = lf_out.with_columns(exprs)
+            lf_out = lf_out.with_columns(exprs)  
 
-        
-
+    # ewm（t-0 当期值；段内重置）
+    if SPANS:
+        spans = sorted({int(s) for s in SPANS if int(s) > 0})
+        for batch in _chunks(feature_cols, batch_size):
+            exprs = []
+            for c in batch:
+                base = pl.col(c)
+                for s in spans:
+                    ema_expr = base.ewm_mean(span=s, adjust=False, min_periods=1, ignore_nulls=True).over(by_sym_streak)
+                    if cast_f32: ema_expr = ema_expr.cast(pl.Float32)
+                    exprs.append(ema_expr.alias(f"{c}__ewm{s}"))
+            lf_out = lf_out.with_columns(exprs)  
                     
 
-    # --- 7) 截面 z / rank（保留 over，但合并成一次 with_columns） ---
+    # =========================
+    # 2)  Cross-sectional（同一 (date,time)）
+    # =========================
     if cs_cols:
+        by_cs  = [g_date, g_time]
         cs_cols = [c for c in cs_cols if c in feature_cols]
         if cs_cols:
+            eps_sig = pl.lit(1e-9)
             exprs = []
             for c in cs_cols:
                 base = pl.col(c)
-                n_valid = base.is_not_null().cast(pl.Int32).sum().over(by_cs)
+                n_valid = base.is_not_null().sum().over(by_cs).cast(pl.Int32)
                 mu      = base.mean().over(by_cs)
                 sig     = base.std(ddof=1).over(by_cs)
-                z = ((base - mu) / (sig.fill_null(0.0) + 1e-9)).cast(pl.Float32 if cast_f32 else pl.Float64)
+                z = pl.when(sig.is_not_null() & (sig > eps_sig)).then((base - mu) / (sig + eps_sig)).otherwise(None)
                 rank_raw = base.rank(method="average").over(by_cs)
                 csrank = pl.when(base.is_null()).then(None).otherwise(
                     pl.when(n_valid > 1)
-                      .then((rank_raw - 0.5) / n_valid.cast(pl.Float32))
-                      .otherwise(pl.lit(0.5))
+                    .then((rank_raw - 0.5) / n_valid.cast(pl.Float32))
+                    .otherwise(pl.lit(0.5))
                 ).cast(pl.Float32 if cast_f32 else pl.Float64)
                 exprs += [z.alias(f"{c}__cs_z"), csrank.alias(f"{c}__csrank")]
             lf_out = lf_out.with_columns(exprs)
 
     # --- 8) 清理临时列 ---
-    drops = ["__gap1", "__streak_id", *[f"__keep{int(k)}" for k in need_k]]
+    drops = ["__gap1", "__streak_id"]
     keep = [c for c in lf_out.collect_schema().names() if c not in drops]
     lf_out = lf_out.select(keep)
     return lf_out

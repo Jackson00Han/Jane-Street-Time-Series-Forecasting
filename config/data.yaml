@@ -67,11 +67,11 @@ dates:
 
   fe_dates:
     date_lo: 800
-    date_hi: 1600
+    date_hi: 860
 
   panel_dates:
     date_lo: 830
-    date_hi: 1600
+    date_hi: 860
 
   mfs_dates:
     date_lo: 1400
