@@ -423,7 +423,7 @@ def fe_feat_history(
     - 为避免过度 with_columns，按 batch 生成。
     """ 
     g_sym, g_date, g_time = keys
-    
+
     # ========== 基本校验与排序 ==========
     need_cols = [*keys, *feature_cols]
     schema = lf.collect_schema().names()
@@ -470,7 +470,7 @@ def fe_feat_history(
     # =========================
     # lag
     if LAGS:
-        for batch in _chunks(feature_cols, batch_size):
+        for batch in _chunks(feature_cols, batch_size): # 不包括 static_cols， 下方同理
             exprs = []
             for c in batch:
                 base = pl.col(c)
@@ -525,7 +525,7 @@ def fe_feat_history(
                     rmean_expr = base.rolling_mean(window_size=w, min_periods=1).over(by_sym_streak)
                     rstd_expr = base.rolling_std(window_size=w, min_periods=2).over(by_sym_streak)
                     rz_expr = pl.when(rstd_expr.is_not_null() & (rstd_expr > eps_std)).then(
-                        (pl.col(c) - rmean_expr) / (rstd_expr + eps_std)
+                        (base - rmean_expr) / (rstd_expr + eps_std)
                     ).otherwise(None)
                     if keep_rmean_rstd:
                         if cast_f32:
@@ -694,6 +694,7 @@ def run_staged_engineering(
 
     # ---------- C（按操作分别输出） ----------
     if C is not None:
+            
         def _do_op(op_name: str, **op_flags):
             lf_src = lf_base.select([*keys, *feature_cols])
             lf_c = fe_feat_history(

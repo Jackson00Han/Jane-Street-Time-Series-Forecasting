@@ -15,6 +15,11 @@ def azify(p: str) -> str:
 def main():
     # ---- 常量/列名 ----
     FEATURE_ALL = [f"feature_{i:02d}" for i in range(79)]
+    # 3 static features
+    SYMBOL_STATIC_FEATURES = ["feature_09", "feature_10", "feature_11"]
+    FEATURES_DY = [f for f in FEATURE_ALL if f not in SYMBOL_STATIC_FEATURES]
+
+    
     RESP_COLS   = [f"responder_{i}" for i in range(9)]
     KEYS        = tuple(cfg["keys"])
     g_sym, g_date, g_time = KEYS
@@ -84,9 +89,10 @@ def main():
         core_lo, core_hi = days[core_lo_idx], days[core_hi_idx]
         pad_lo = days[pad_lo_idx]
 
+
         lf_shard = (
             lc.filter(pl.col(g_date).is_between(pad_lo, core_hi))
-              .select([*cfg['keys'], cfg['weight'], TB, *RESP_COLS, *FEATURE_ALL])
+              .select([*cfg['keys'], cfg['weight'], TB, *RESP_COLS, *FEATURES_DY])
         )
 
         out_dir = azify(f"{fe_root}/fe_{core_lo:04d}_{core_hi:04d}")
@@ -97,7 +103,7 @@ def main():
             lf_base=lf_shard,
             keys=cfg['keys'],
             rep_cols=RESP_COLS,
-            feature_cols=FEATURE_ALL,
+            feature_cols=FEATURES_DY,
             out_dir=out_dir,
             A=A, B=B, C=C,
             write_date_between=(core_lo, core_hi),

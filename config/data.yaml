@@ -45,8 +45,8 @@ paths:
   tmp:          "tmp"
 
   fs_mm_prefix: "/mnt/data/js/exp/v1/fs_mm/full_sample_v1"
-  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1400-1600__cv2-g7-r4__seed42__top1000__1760734398.txt"
-  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1400-1600__cv2-g7-r4__seed42__top1000__1760734398__range1000-1600"
+  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660.txt"
+  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660__range830-1698"
 
 lgbm_selected_features_path: "/mnt/data/js/exp/v1/models/tune/feature_importance__fixed__fixed__mm_full_train__features__fs__1400-1600__cv2-g7-r4__seed42__top1000__1760734398__range1000-1600__range1000-1600__cv2-g7-r4__1760740035.csv"
 # 关键列与目标
@@ -67,27 +67,27 @@ dates:
 
   fe_dates:
     date_lo: 800
-    date_hi: 860
+    date_hi: 1698
 
   panel_dates:
     date_lo: 830
-    date_hi: 860
+    date_hi: 1698
 
   mfs_dates:
     date_lo: 1400
-    date_hi: 1600
+    date_hi: 1698
 
   fs_dates:
     date_lo: 1400
-    date_hi: 1600
+    date_hi: 1698
 
   mtrain_dates:
-    date_lo: 1000
-    date_hi: 1600
+    date_lo: 830
+    date_hi: 1698
 
   tune_dates:
-    date_lo: 1000
-    date_hi: 1600
+    date_lo: 830
+    date_hi: 1698
 
 
 cv:
