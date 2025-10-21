@@ -91,9 +91,9 @@ dates:
 
 
 cv:
-  n_splits: 2
-  gap_days: 7
-  train_to_val: 4
+  n_splits: 1
+  gap_days: 0
+  train_to_val: 2
 
 
 
