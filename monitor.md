@@ -1,5 +1,5 @@
 # GPU 实时
-watch -n 0.5 nvidia-smi
+watch -n 1.0 nvidia-smi
 
 # CPU/RAM
 htop          # 看 python 进程的 RES
