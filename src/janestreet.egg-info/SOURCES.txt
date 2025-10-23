@@ -11,7 +11,10 @@ src/pipeline/features.py
 src/pipeline/io.py
 src/pipeline/memmap.py
 src/pipeline/preprocess.py
+src/pipeline/stream_input.py
+src/pipeline/stream_input_local.py
 src/pipeline/validate.py
+src/pipeline/wr2.py
 src/pipeline/entrypoints/best_iteration.py
 src/pipeline/entrypoints/clean.py
 src/pipeline/entrypoints/fe.py
@@ -21,5 +24,4 @@ src/pipeline/entrypoints/hp_tune.py
 src/pipeline/entrypoints/memmap_after_fs.py
 src/pipeline/entrypoints/memmap_fs.py
 src/pipeline/entrypoints/panel.py
-src/pipeline/entrypoints/tft_cv.py
 src/pipeline/entrypoints/tune_fixed.py
