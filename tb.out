@@ -8,3 +8,4 @@ NOTE: Using experimental fast data loading logic. To disable, pass
     https://github.com/tensorflow/tensorboard/issues/4784
 
 TensorBoard 2.20.0 at http://0.0.0.0:6006/ (Press CTRL+C to quit)
+TensorBoard caught SIGTERM; exiting...
