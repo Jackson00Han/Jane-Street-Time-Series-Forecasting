@@ -8,3 +8,7 @@ vmstat 1
 
 # 若崩了，立刻查看是否被 OOM-killer 杀掉
 sudo journalctl -k -n 200 | egrep -i "out of memory|killed process|oom-killer"
+
+# 查看并结束所有残留的 ipykernel / jupyter 进程
+pgrep -af "ipykernel|jupyter-notebook|jupyter-lab"
+pkill -f "ipykernel|jupyter-notebook|jupyter-lab"
