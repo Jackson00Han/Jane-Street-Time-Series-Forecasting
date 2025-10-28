@@ -1,0 +1,333 @@
+# =========================
+# Jane Street – Time Series Project Configuration
+# =========================
+
+project:
+  name: "janestreet"
+
+schema_version: 1
+
+# -----------------------------
+# I/O & storage
+# -----------------------------
+
+# for raw data, big intermediate artifacts-- preprocessed data, cleaned shards, feature-engineered shards, etc.
+azure:
+  root: "jackson/js_exp"
+
+
+# for small data: well preprocessed data, models, and reports cache
+local:
+  root: "/mnt/data/js"
+
+
+
+# -----------------------------
+# Paths (relative roots & concrete artifacts)
+# -----------------------------
+paths:
+  raw_partitions:      { store: "azure", rel: "raw/train.parquet" }
+  clean_shards:  { store: "azure", rel: "clean_shards" }
+  fe_shards:     { store: "azure", rel: "fe_shards" }
+  panel_shards:  { store: "azure", rel: "panel_shards" }
+  fs_mm:         { store: "local", rel: "fs_mm" }
+  train_mm:      { store: "local", rel: "train_mm" }
+  models:        { store: "local", rel: "models" }
+  reports:       { store: "local", rel: "reports" }
+  cache:         { store: "local", rel: "cache" }
+  tmp:           { store: "local", rel: "tmp" }
+  
+
+# name templating context (used to build derived artifact names)
+naming:
+  run_tag: "fs__{fs_lo}-{fs_hi}__cv{cv}-g{g}-r{r}__seed{seed}__top{top}__{rand}"
+
+# defaults for templating variables (override in exp files if needed)
+context:
+  fs_lo: 1400
+  fs_hi: 1698
+  panel_lo: 830
+  panel_hi: 1698
+  cv: 2
+  g: 7
+  r: 4
+  top: 1000
+  rand: 1760906660
+
+# derived absolute paths (keep your original absolute defaults; can be templated)
+derived_paths:
+  fs_mm_prefix: "/mnt/data/js/exp/v1/fs_mm/full_sample_v1"
+  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660.txt"
+  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660__range830-1698"
+
+# optionally keep the selected features csv path (original)
+lgbm_selected_features_path: "/mnt/data/js/exp/v1/models/tune/feature_importance__fixed__fixed__mm_full_train__features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660__range830-1698__range830-1698__cv2-g7-r4__1760912739.csv"
+
+# -----------------------------
+# Core columns & target
+# -----------------------------
+columns:
+  keys: ["symbol_id", "date_id", "time_id"]
+  target: "responder_6"
+  weight: "weight"
+  allowlist: ["time_pos", "time_sin", "time_cos", "time_bucket"]
+
+sorts:
+  time_major: ["date_id", "time_id", "symbol_id"]
+
+time_bucket: "time_bucket"
+
+# -----------------------------
+# Date ranges (by logical purpose)
+# -----------------------------
+dates:
+  clean:  { date_lo: 800,  date_hi: 1600 }
+  fe:     { date_lo: 800,  date_hi: 1698 }
+  panel:  { date_lo: 830,  date_hi: 1698 }
+  mfs:    { date_lo: 1400, date_hi: 1698 }
+  fs:     { date_lo: 1400, date_hi: 1698 }
+  mtrain: { date_lo: 830,  date_hi: 1698 }
+  tune:   { date_lo: 830,  date_hi: 1698 }
+
+# -----------------------------
+# Cross-validation (non-backtest simple CV)
+# -----------------------------
+cv:
+  n_splits: 1
+  gap_days: 0
+  train_to_val: 2
+
+# -----------------------------
+# Time-series task definition
+# -----------------------------
+task:
+  target: "responder_6"          # duplicate on purpose for clarity; can be synced with columns.target
+  weight: "weight"
+  horizons: [1]                  # predict 1 step ahead; extend as needed e.g., [6, 12]
+  align: "right"                 # label at t+h aligned to features at t
+  loss: "l2"                     # l2 | l1 | huber | quantile
+  quantiles: null
+
+# -----------------------------
+# Backtesting protocol
+# -----------------------------
+backtest:
+  scheme: "sliding"              # sliding | expanding
+  step_days: 5                   # advance step per fold
+  train_span_days: 300
+  val_span_days: 20
+  test_span_days: 0              # set >0 if test slice per fold is needed
+  min_train_days: 120
+  fold_limit: null
+  anchor:
+    start_date_id: 830
+    end_date_id: 1698
+
+# -----------------------------
+# Metrics & aggregation
+# -----------------------------
+metrics:
+  point: ["mae", "rmse", "mape", "smape"]
+  rank:  ["spearman_ic", "pearson_ic"]
+  classification_like:
+    enabled: true
+    thresholds: [0.0]
+  aggregate:
+    method: "mean"               # mean | weighted | median
+    weight_col: "weight"
+  report:
+    by_symbol: true
+    by_time_bucket: true
+    topk_long_short: [20]
+
+# -----------------------------
+# Trading-time parameters
+# -----------------------------
+trading:
+  ticks: 968
+  bucket_size: 6
+
+# -----------------------------
+# Missing value filling
+# -----------------------------
+fill:
+  steps:
+    - name: open_ttl
+      enabled: true
+      params:
+        open_tick_window: [0, 10]
+        ttl_days_open: 7
+    - name: intraday_ffill
+      enabled: true
+      params:
+        max_gap_ticks: 200
+    - name: same_tick_ttl
+      enabled: true
+      params:
+        ttl_days: 7
+    - name: intraday_ffill
+      enabled: true
+      params:
+        max_gap_ticks: 200
+  batch_size: 30
+
+# -----------------------------
+# Winsorization / outlier handling
+# -----------------------------
+winsorization:
+  method: "zscore"
+  groupby: ["symbol_id", "time_bucket"]
+  z_k: 3
+  ddof: 1
+  window: 480
+  min_valid: 10
+  cast_float32: true
+  sanitize: true
+
+# -----------------------------
+# Feature engineering
+# -----------------------------
+feature_eng:
+  A:
+    enabled: true
+    is_sorted: false
+    cast_f32: true
+    tail_lags:  [1, 10, 50, 100, 500, 900, 950, 967]
+    tail_diffs: [1, 5, 10, 30]
+    rolling_windows: [3, 7, 14, 30]
+
+  B:
+    enabled: true
+    is_sorted: false
+    cast_f32: true
+    lags: [1, 2, 3, 4, 5, 6, 7, 14, 21, 30]
+    stats_rep_cols: null
+    add_prev1_multirep: true
+    batch_size: 5
+
+  C:
+    enabled: true
+    is_sorted: false
+    cast_f32: true
+    batch_size: 10
+    lags: [1, 2, 10, 50, 100, 500, 900, 950, 968, 1936, 2904, 3872, 4840, 5808, 6776, 7744]
+    ret_periods:  [3, 10, 50]
+    diff_periods: [3, 10, 50]
+    rz_windows:   [3, 7, 14, 30]
+    ewm_spans:    [5, 10, 50]
+    keep_rmean_rstd: true
+    cs_cols: ["feature_06", "feature_59", "feature_04", "feature_76", "feature_75", "feature_60", "feature_26"]
+  fe_pad_days: 30
+  fe_core_days: 30
+
+# -----------------------------
+# Leakage guards
+# -----------------------------
+leakage:
+  enforce_causal_roll: true      # use past-only windows (e.g., shift before rolling)
+  forbid_future_merge: true
+  forbid_target_in_features: true
+  forbid_weight_in_targets: false
+  check_time_monotone: true
+
+# -----------------------------
+# Sampling / weighting
+# -----------------------------
+sampling:
+  scheme: "time_uniform"         # time_uniform | symbol_uniform | weighted
+  symbol_uniform_topn: null
+  downsample_zero_weight: true
+
+# -----------------------------
+# Inference / production
+# -----------------------------
+inference:
+  mode: "incremental"            # batch | incremental
+  min_history_days: 30
+  warmup_days: 7
+  cache:
+    enable: true
+    key: "{date_id}-{time_id}-{symbol_id}"
+    ttl_days: 14
+
+# -----------------------------
+# Feature I/O (selection, importances)
+# -----------------------------
+features_io:
+  selected_features_in:  "/mnt/data/js/exp/v1/models/tune/selected_features.csv"   # optional
+  selected_features_out: "/mnt/data/js/exp/v1/models/tune/selected_features__{naming.run_tag}.csv"
+  export_importance: true
+
+# -----------------------------
+# Model registry (pluggable)
+# -----------------------------
+models:
+  default: "lgbm_best"
+
+  lgbm_select:
+    class: "pipeline.models.lgbm:LGBMSelector"
+    params:
+      device_type: "gpu"
+      learning_rate: 0.05
+      num_leaves: 63
+      max_depth: 8
+      feature_fraction: 0.80
+      bagging_fraction: 0.80
+      bagging_freq: 1
+      min_data_in_leaf: 200
+      num_boost_round: 4000
+      early_stopping_rounds: 100
+      log_period: 100
+      select_top_k: 1000
+
+  lgb_tune:
+    class: "pipeline.models.lgbm:LGBMTuner"
+    params:
+      device_type: "cpu"
+      num_boost_round: 2000
+      early_stopping_rounds: 100
+      log_period: 100
+      n_trials: 40
+
+  lgbm_best:
+    class: "pipeline.models.lgbm:LGBMFinal"
+    params:
+      device_type: "gpu"
+      num_boost_round: 4000
+      early_stopping_rounds: 100
+      log_period: 100
+      final_boost_margin: 1.1
+      num_leaves: 111
+      max_depth: 12
+      min_data_in_leaf: 1000
+      learning_rate: 0.05394633936788147
+      feature_fraction: 0.7390046601106091
+      bagging_fraction: 0.7389986300840506
+      bagging_freq: 1
+      lambda_l2: 17.323522915498703
+      lambda_l1: 3.005575058716044
+      min_gain_to_split: 0.07080725777960455
+
+  # tft:
+  #   class: "pipeline.models.tft:TFTForecaster"
+  #   params: { ... }
+
+# -----------------------------
+# Logging & run metadata
+# -----------------------------
+logging:
+  level: "INFO"
+  color: true
+  rich_traceback: true
+
+run:
+  name: null
+  tags: []
+  notes: null
+
+# -----------------------------
+# Resources
+# -----------------------------
+resources:
+  cpu_workers: 8
+  gpu: true
