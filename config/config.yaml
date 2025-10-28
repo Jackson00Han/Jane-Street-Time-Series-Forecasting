@@ -1,67 +1,18 @@
 # =========================
 # Jane Street – Time Series Project Configuration
 # =========================
-
 project:
   name: "janestreet"
-
-schema_version: 1
-
-# -----------------------------
-# I/O & storage
-# -----------------------------
-
-# for raw data, big intermediate artifacts-- preprocessed data, cleaned shards, feature-engineered shards, etc.
-azure:
-  root: "jackson/js_exp"
-
-
-# for small data: well preprocessed data, models, and reports cache
-local:
-  root: "/mnt/data/js"
-
-
+schema_version: "v1"
 
 # -----------------------------
-# Paths (relative roots & concrete artifacts)
+# Time-series task definition
 # -----------------------------
-paths:
-  raw_partitions:      { store: "azure", rel: "raw/train.parquet" }
-  clean_shards:  { store: "azure", rel: "clean_shards" }
-  fe_shards:     { store: "azure", rel: "fe_shards" }
-  panel_shards:  { store: "azure", rel: "panel_shards" }
-  fs_mm:         { store: "local", rel: "fs_mm" }
-  train_mm:      { store: "local", rel: "train_mm" }
-  models:        { store: "local", rel: "models" }
-  reports:       { store: "local", rel: "reports" }
-  cache:         { store: "local", rel: "cache" }
-  tmp:           { store: "local", rel: "tmp" }
-  
-
-# name templating context (used to build derived artifact names)
-naming:
-  run_tag: "fs__{fs_lo}-{fs_hi}__cv{cv}-g{g}-r{r}__seed{seed}__top{top}__{rand}"
-
-# defaults for templating variables (override in exp files if needed)
-context:
-  fs_lo: 1400
-  fs_hi: 1698
-  panel_lo: 830
-  panel_hi: 1698
-  cv: 2
-  g: 7
-  r: 4
-  top: 1000
-  rand: 1760906660
-
-# derived absolute paths (keep your original absolute defaults; can be templated)
-derived_paths:
-  fs_mm_prefix: "/mnt/data/js/exp/v1/fs_mm/full_sample_v1"
-  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660.txt"
-  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660__range830-1698"
-
-# optionally keep the selected features csv path (original)
-lgbm_selected_features_path: "/mnt/data/js/exp/v1/models/tune/feature_importance__fixed__fixed__mm_full_train__features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660__range830-1698__range830-1698__cv2-g7-r4__1760912739.csv"
+task:
+  target: "responder_6"          # duplicate on purpose for clarity; can be synced with columns.target
+  weight: "weight"
+  horizons: 1                  # predict 1 step ahead; extend as needed e.g., [6, 12]
+  loss: "wr2"                     # l2 | l1 | huber | quantile
 
 # -----------------------------
 # Core columns & target
@@ -74,14 +25,54 @@ columns:
 
 sorts:
   time_major: ["date_id", "time_id", "symbol_id"]
+  symbol_major: ["symbol_id", "date_id", "time_id"]
 
-time_bucket: "time_bucket"
+
+
+# -----------------------------
+# I/O & storage
+# -----------------------------
+azure: 
+  root: "jackson/js_exp" # for raw data, big intermediate artifacts-- preprocessed data, cleaned shards, feature-engineered shards, etc.
+local:
+  root: "/mnt/data/js/v1" # for small data: well preprocessed data, models, and reports cache
+
+# -----------------------------
+# Paths (relative roots & concrete artifacts)
+# -----------------------------
+paths:
+  raw_partitions:      { store: "azure", rel: "raw/train.parquet" }
+  clean_shards:        { store: "azure", rel: "clean_shards" } 
+  fe_shards:           { store: "azure", rel: "fe_shards" }
+  panel_shards:        { store: "azure", rel: "panel_shards" }
+  lgbm:                { store: "local", rel: "lgbm" } 
+  fs_mm:               { store: "local", rel: "fs_mm" }
+  train_mm:            { store: "local", rel: "train_mm" }
+  models:              { store: "local", rel: "models" }
+  reports:             { store: "local", rel: "reports" }
+  cache:               { store: "local", rel: "cache" }
+  tmp:                 { store: "local", rel: "tmp" }
+  tft:                 { store: "local", rel: "tft" }
+  
+
+# name templating context (used to build derived artifact names)
+naming:
+  run_tag: "fs__{fs_lo}-{fs_hi}__cv{cv}-g{g}-r{r}__seed{seed}__top{top}__{rand}"
+
+# derived absolute paths (keep your original absolute defaults; can be templated)
+derived_paths:
+  fs_mm_prefix: "/mnt/data/js/exp/v1/fs_mm/full_sample_v1"
+  feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660.txt"
+  train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660__range830-1698"
+
+# optionally keep the selected features csv path (original)
+lgbm_selected_features_path: "/mnt/data/js/exp/v1/models/tune/feature_importance__fixed__fixed__mm_full_train__features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660__range830-1698__range830-1698__cv2-g7-r4__1760912739.csv"
 
 # -----------------------------
 # Date ranges (by logical purpose)
 # -----------------------------
 dates:
-  clean:  { date_lo: 800,  date_hi: 1600 }
+  clean:  { date_lo: 800,  date_hi: 1698 }
   fe:     { date_lo: 800,  date_hi: 1698 }
   panel:  { date_lo: 830,  date_hi: 1698 }
   mfs:    { date_lo: 1400, date_hi: 1698 }
@@ -97,16 +88,7 @@ cv:
   gap_days: 0
   train_to_val: 2
 
-# -----------------------------
-# Time-series task definition
-# -----------------------------
-task:
-  target: "responder_6"          # duplicate on purpose for clarity; can be synced with columns.target
-  weight: "weight"
-  horizons: [1]                  # predict 1 step ahead; extend as needed e.g., [6, 12]
-  align: "right"                 # label at t+h aligned to features at t
-  loss: "l2"                     # l2 | l1 | huber | quantile
-  quantiles: null
+
 
 # -----------------------------
 # Backtesting protocol
@@ -144,32 +126,9 @@ metrics:
 # Trading-time parameters
 # -----------------------------
 trading:
-  ticks: 968
+  daily_ticks: 968
   bucket_size: 6
 
-# -----------------------------
-# Missing value filling
-# -----------------------------
-fill:
-  steps:
-    - name: open_ttl
-      enabled: true
-      params:
-        open_tick_window: [0, 10]
-        ttl_days_open: 7
-    - name: intraday_ffill
-      enabled: true
-      params:
-        max_gap_ticks: 200
-    - name: same_tick_ttl
-      enabled: true
-      params:
-        ttl_days: 7
-    - name: intraday_ffill
-      enabled: true
-      params:
-        max_gap_ticks: 200
-  batch_size: 30
 
 # -----------------------------
 # Winsorization / outlier handling
@@ -183,6 +142,24 @@ winsorization:
   min_valid: 10
   cast_float32: true
   sanitize: true
+
+
+
+# -----------------------------
+# Missing value filling
+# -----------------------------
+fill:
+  open_tick_window: [0, 10]
+  ttl_days_open: 7
+  intra_ffill_max_gap_ticks: 200
+  ttl_days_same_tick: 7
+  order:
+    - "open_ttl"
+    - "intraday_ffill"
+    - "same_tick_ttl"
+    - "intraday_ffill"
+  batch_size: 30
+
 
 # -----------------------------
 # Feature engineering

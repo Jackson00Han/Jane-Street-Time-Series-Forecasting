@@ -1,6 +1,7 @@
 # src/pipeline/io.py
 from __future__ import annotations
 import os, base64
+from functools import lru_cache
 from pathlib import Path
 import yaml, fsspec
 from dotenv import load_dotenv
@@ -31,10 +32,19 @@ ROOT = Path(find_project_root())
 # ---------- 1) Azure 存储配置 ----------
 path_env = f"{ROOT}/.env"
 load_dotenv(dotenv_path=path_env, override=False)  # 读取 .env 到环境变量（若没有 .env 也不报错）
+
+os.environ.pop("AZURE_STORAGE_CONNECTION_STRING", None)
+os.environ.pop("AZURE_STORAGE_SAS_TOKEN", None)
 ACC = (os.getenv("AZURE_STORAGE_ACCOUNT_NAME") or "").strip()
 KEY = (os.getenv("AZURE_STORAGE_ACCOUNT_KEY") or "").strip()
+if not ACC or not KEY:
+    raise RuntimeError("请在 .env 或环境变量中设置 AZURE_STORAGE_ACCOUNT_NAME / AZURE_STORAGE_ACCOUNT_KEY")
+# 提前校验 Key（能早发现粘贴/截断问题）
+base64.b64decode(KEY, validate=True)
+
 storage_options = {"account_name": ACC, "account_key": KEY}
 
+@lru_cache(maxsize=1)
 def get_fs():
     return fsspec.filesystem("az", **storage_options)
 fs = get_fs()
