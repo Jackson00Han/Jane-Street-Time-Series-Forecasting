@@ -1,69 +1,63 @@
 # =========================
-# Jane Street 项目全局配置
+# Jane Street Global Configuration
 # =========================
 
+# Version and experiment root
+exp_root: "exp/v1"
 
-# 版本与根
-exp_root: "exp/v1"          # 切版本只改这里
-
-# --------- 随机与可复现 ---------
+# --------- Reproducibility ---------
 seed: 42
 
 # -----------------------------
-# I/O 配置
+# I/O Configuration
 # -----------------------------
 io:
-  backend: azure        # local | azure   ← 在这里切换
+  backend: azure        # local | azure
 
-# 云端配置（Azure Blob Storage）
 blob:
   container: "jackson"
-  prefix: "js_exp"          # 云端容器内的项目前缀
+  prefix: "js_exp"
 
 local:
-  root: "/mnt/data/js"      # 本地数据根目录
+  root: "/mnt/data/js"
 
-# 目录
 paths:
-  raw_root:          "raw" # 在blob/container/prefix内的相对路径
+  raw_root: "raw"
 
-  # 相对 exp_root 的相对路径
-  raw_shards:   "raw_shards"
-  clean_shards: "clean_shards"          # 清洗后分片，供特征工程
-  fe_shards:    "fe_shards"             # 特征分片
-  sample_fe:    "sample_fe"             # 采样后的特征（可选）
-  panel_shards: "panel_shards"          # 面板化分片
+  raw_shards: "raw_shards"
+  clean_shards: "clean_shards"
+  fe_shards: "fe_shards"
+  sample_fe: "sample_fe"
+  panel_shards: "panel_shards"
 
-  tft:        "tft"               # tft 专用目录
+  tft: "tft"
 
-  fs_mm:    "fs_mm"             # 采样内存映射（本地）
-  train_mm:     "train_mm"              # 面板内存映射（本地）
+  fs_mm: "fs_mm"
+  train_mm: "train_mm"
 
-  models:       "models"
-  reports:      "reports"
-  cache:        "cache"
-  tmp:          "tmp"
+  models: "models"
+  reports: "reports"
+  cache: "cache"
+  tmp: "tmp"
 
   fs_mm_prefix: "/mnt/data/js/exp/v1/fs_mm/full_sample_v1"
   feature_list_path: "/mnt/data/js/exp/v1/reports/fi/features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660.txt"
   train_mm_prefix: "/mnt/data/js/exp/v1/train_mm/full_train__features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660__range830-1698"
 
 lgbm_selected_features_path: "/mnt/data/js/exp/v1/models/tune/feature_importance__fixed__fixed__mm_full_train__features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660__range830-1698__range830-1698__cv2-g7-r4__1760912739.csv"
-# 关键列与目标
+
 keys: ["symbol_id", "date_id", "time_id"]
 target: "responder_6"
 weight: "weight"
 sorts:
   time_major: ["date_id", "time_id", "symbol_id"]
-time_bucket: "time_bucket"           # 生成的时间桶列名（与 bucket_size 相关）
+time_bucket: "time_bucket"
 
-
-
-# --------- 数据时间范围与切分 ---------
+# --------- Date ranges and splits ---------
 dates:
   clean_dates:
-    date_lo: 800 # 原始数据起点日期
-    date_hi: 1600 # 原始数据终点日期（含）
+    date_lo: 800
+    date_hi: 1600
 
   fe_dates:
     date_lo: 800
@@ -89,56 +83,47 @@ dates:
     date_lo: 830
     date_hi: 1698
 
-
 cv:
   n_splits: 1
   gap_days: 0
   train_to_val: 2
 
-
-
-# --------- 交易时序参数（影响填充/窗口等） ---------
+# --------- Trading time parameters ---------
 trading:
-  ticks: 968 # 最大日tick数（从0-967）
-  bucket_size: 6                         # 用于 time_bucket 的桶宽
-  #open_auction_ticks: 5                  # 开盘集合竞价长度（用于跨日 TTL 生效窗口）
-  #close_auction_ticks: 5                 # 收盘集合竞价长度（用于跨日 TTL 生效窗口）
+  ticks: 968
+  bucket_size: 6
 
-# --------- 缺失值填充策略 ---------
+# --------- Missing value filling ---------
 fill:
-  open_tick_window: [0, 10]          # 半开区间 [0,10)
-  ttl_days_open: 7                 # 开盘跨日承接 TTL（天）
-  intra_ffill_max_gap_ticks: 200     # 日内向前填补的最大跨度（tick）
-  ttl_days_same_tick: 7           # 同一 time_id 跨日承接 TTL（天，None 关闭）
+  open_tick_window: [0, 10]
+  ttl_days_open: 7
+  intra_ffill_max_gap_ticks: 200
+  ttl_days_same_tick: 7
   order:
-    - "open_ttl"                     # 步骤1
-    - "intraday_ffill"               # 步骤2
-    - "same_tick_ttl"                # 步骤3（可选）
-    - "intraday_ffill"               # 步骤4（再传播
-  batch_size: 30                     # 按日期分批保存（内存控制）
+    - "open_ttl"
+    - "intraday_ffill"
+    - "same_tick_ttl"
+    - "intraday_ffill"
+  batch_size: 30
 
-
-# --------- 极端值处理（Winsorize/截断） ---------
+# --------- Winsorization / Outlier handling ---------
 winsorization:
-  method: "zscore"          # 这一步走 zscore
-  groupby: ["symbol_id", "time_bucket"]    # 如发现强日内季节性可改为 ["symbol_id","time_id"]
+  method: "zscore"
+  groupby: ["symbol_id", "time_bucket"]
   z_k: 3
   ddof: 1
   window: 480
   min_valid: 10
   cast_float32: true
-  sanitize: true                     # 是否先将 inf/-inf 替换为 null
-
+  sanitize: true
 
 feature_eng:
   A:
     enabled: true
     is_sorted: false
     cast_f32: true
-    # 适度的尾部滞后
     tail_lags: [1, 10, 50, 100, 500, 900, 950, 967]
     tail_diffs: [1, 5, 10, 30]
-    # 日度滚动：短中长三档
     rolling_windows: [3, 7, 14, 30]
 
   B:
@@ -150,27 +135,24 @@ feature_eng:
     add_prev1_multirep: true
     batch_size: 5
 
-
   C:
     enabled: true
     is_sorted: false
     cast_f32: true
     batch_size: 10
-    # 适度的历史派生
     lags: [1, 2, 10, 50, 100, 500, 900, 950, 968, 1936, 2904, 3872, 4840, 5808, 6776, 7744]
     ret_periods: [3, 10, 50]
-    diff_periods: [3, 10,  50]
+    diff_periods: [3, 10, 50]
     rz_windows: [3, 7, 14, 30]
     ewm_spans: [5, 10, 50]
     keep_rmean_rstd: true
-    cs_cols: ["feature_06", "feature_59", "feature_04", "feature_76", "feature_75", "feature_60", "feature_26"]              # 若后续要做截面rank，再指定列名
+    cs_cols: ["feature_06", "feature_59", "feature_04", "feature_76", "feature_75", "feature_60", "feature_26"]
 
   fe_pad_days: 30
   fe_core_days: 30
 
-
 lgb_select:
-  device_type: gpu        # 或 cpu
+  device_type: gpu
   learning_rate: 0.05
   num_leaves: 63
   max_depth: 8
@@ -181,16 +163,14 @@ lgb_select:
   num_boost_round: 4000
   early_stopping_rounds: 100
   log_period: 100 
-  select_top_k: 1000       # 导出前K特征
+  select_top_k: 1000
 
 lgb+tune:
-  device_type: cpu        # 或 cpu
+  device_type: cpu
   num_boost_round: 2000
   early_stopping_rounds: 100
   log_period: 100
-
   n_trials: 40
-
 
 lgb_best:
   device_type: gpu
@@ -209,14 +189,9 @@ lgb_best:
   lambda_l1: 3.005575058716044
   min_gain_to_split: 0.07080725777960455
 
-
-# --------- 列级白名单（强约束，防止隐形泄露） ---------
 white_list: ["time_pos", "time_sin", "time_cos", "time_bucket"]
 
-
 debug:
-  check_time_monotone: true   # 开发期开；批量/生产可关
+  check_time_monotone: true
 
-
-
-# --------- 报告与审计 ---------
+# --------- Reporting and audit ---------
