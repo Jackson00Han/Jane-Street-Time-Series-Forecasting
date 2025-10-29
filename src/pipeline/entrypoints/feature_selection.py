@@ -7,7 +7,7 @@ import lightgbm as lgb
 from tqdm.auto import tqdm  # ✅ 进度条
 
 from pipeline.io import cfg, P, ensure_dir_local
-from pipeline.memmap import make_sliding_cv_fast
+from pipeline.backtest import make_sliding_cv_fast
 
 # ---------- helpers for logging ----------
 def _fmt_s(t: float) -> str:

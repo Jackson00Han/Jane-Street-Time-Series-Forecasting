@@ -73,7 +73,7 @@ lgbm_selected_features_path: "/mnt/data/js/exp/v1/models/tune/feature_importance
 # -----------------------------
 dates:
   clean:  { date_lo: 800,  date_hi: 1698 }
-  fe:     { date_lo: 800,  date_hi: 1698 }
+  fe:     { date_lo: 830,  date_hi: 1698 }
   panel:  { date_lo: 830,  date_hi: 1698 }
   mfs:    { date_lo: 1400, date_hi: 1698 }
   fs:     { date_lo: 1400, date_hi: 1698 }

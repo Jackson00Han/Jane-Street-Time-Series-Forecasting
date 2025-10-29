@@ -4,7 +4,7 @@ from typing import List, Dict
 import os, json, time, gc
 import numpy as np
 import polars as pl
-from pipeline.io import storage_options  # 用于远端读取
+from pipeline.io import storage_options  # for remote parquet reading
 
 def shard2memmap(
     sorted_paths: List[str],
@@ -15,9 +15,15 @@ def shard2memmap(
     target_col: str = "responder_0",
     weight_col: str = "weight",
 ) -> Dict[str, str]:
-    """将若干已排序的 panel 分片堆叠成本地 memmap。"""
+    """Stack multiple **already-sorted** panel shards into local NumPy memmaps.
 
-    # 预扫行数
+    Notes:
+      - The row order across `sorted_paths` is preserved.
+      - Feature matrix X is float32; y/w are float32; `date` is int32.
+      - The function intentionally loads per-shard blocks to bound peak memory.
+    """
+
+    # Pass 1: count rows per shard (fast logical length)
     counts = []
     for p in sorted_paths:
         k = pl.scan_parquet(p, storage_options=storage_options).select(pl.len()).collect(streaming=True).item()
@@ -25,20 +31,22 @@ def shard2memmap(
 
     n_rows, n_feat = int(sum(counts)), len(feat_cols)
     os.makedirs(os.path.dirname(prefix), exist_ok=True)
-
+    
+    # Allocate memmaps
     X = np.memmap(f"{prefix}_X.float32.mmap", dtype=np.float32, mode="w+", shape=(n_rows, n_feat))
     y = np.memmap(f"{prefix}_y.float32.mmap", dtype=np.float32, mode="w+", shape=(n_rows,))
     w = np.memmap(f"{prefix}_w.float32.mmap", dtype=np.float32, mode="w+", shape=(n_rows,))
     d = np.memmap(f"{prefix}_date.int32.mmap", dtype=np.int32,   mode="w+", shape=(n_rows,))
 
     need_cols = [date_col, target_col, weight_col, *feat_cols]
-
+    
+    # Pass 2: stream shards -> write into the memmaps
     ofs = 0
     for p, k in zip(sorted_paths, counts):
         df = pl.scan_parquet(p, storage_options=storage_options).select(need_cols).collect(streaming=True)
         
 
-        # 转 numpy（零拷贝尽可能）
+        # Convert to numpy (avoid extra copies where possible)
         X_block = df.select(feat_cols).to_numpy().astype(np.float32, copy=False)
         y_block = df.get_column(target_col).to_numpy().astype(np.float32, copy=False).ravel()
         w_block = df.get_column(weight_col).to_numpy().astype(np.float32, copy=False).ravel()
@@ -52,9 +60,11 @@ def shard2memmap(
         ofs += k
         del df, X_block, y_block, w_block, d_block
         gc.collect()
-
+        
+    # Ensure data is flushed
     X.flush(); y.flush(); w.flush(); d.flush()
-
+    
+    # Write metadata (types keyed by the actual `date_col`)
     meta = {
         "n_rows": int(n_rows),
         "n_feat": int(n_feat),
@@ -77,34 +87,11 @@ def shard2memmap(
         "meta": f"{prefix}.meta.json",
     }
 
-def day_ptrs_from_sorted_dates(d: np.ndarray):
-    d = d.ravel()
-    starts = np.r_[0, np.flatnonzero(d[1:] != d[:-1]) + 1]
-    days   = d[starts]
-    ends   = np.r_[starts[1:], d.size]
-    return days, starts, ends
+#def day_ptrs_from_sorted_dates(d: np.ndarray):
+#    d = d.ravel()
+#    starts = np.r_[0, np.flatnonzero(d[1:] != d[:-1]) + 1]
+#    days   = d[starts]
+#    ends   = np.r_[starts[1:], d.size]
+#    return days, starts, ends
 
-def make_sliding_cv_fast(date_ids: np.ndarray, *, n_splits: int, gap_days: int = 5, train_to_val: int = 9):
-    days, starts, ends = day_ptrs_from_sorted_dates(date_ids)
-    N, R, K, G = len(days), int(train_to_val), int(n_splits), int(gap_days)
-    usable = N - G
-    if usable <= 0 or K <= 0 or R <= 0:
-        return []
-    V_base, rem = divmod(usable, R + K)
-    if V_base <= 0:
-        return []
-    T = R * V_base
-    v_lens = [V_base + 1 if i < rem else V_base for i in range(K)]
-    v_lo = T + G
-    folds = []
-    for V_i in v_lens:
-        v_hi  = v_lo + V_i
-        tr_hi = v_lo - G
-        tr_lo = tr_hi - T
-        if tr_lo < 0 or v_hi > N:
-            break
-        tr_idx = np.arange(starts[tr_lo], ends[tr_hi-1])
-        va_idx = np.arange(starts[v_lo],   ends[v_hi-1])
-        folds.append((tr_idx, va_idx))
-        v_lo = v_hi
-    return folds
+
