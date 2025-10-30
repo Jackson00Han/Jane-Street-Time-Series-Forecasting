@@ -144,7 +144,7 @@ def main():
                 params, dtrain,
                 valid_sets=[dvalid],
                 valid_names=["val"],
-                feval=lgb_wr2,                      # ← unified custom metric
+                feval=lgb_wr2,
                 num_boost_round=tune_rounds,
                 callbacks=[
                     lgb.early_stopping(stopping_rounds=es_rounds, verbose=False),

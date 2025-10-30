@@ -10,6 +10,8 @@ from tqdm.auto import tqdm
 from pipeline.io import cfg, ensure_dir_local
 from pipeline.backtest import make_sliding_cv
 from pipeline.metrics import lgb_wr2
+from contextlib import redirect_stderr
+
 
 # ---------- utils ----------
 def load_mm(prefix: str):
@@ -82,9 +84,9 @@ def main():
     # =========================
     seed_val = int(cfg["seed"])
     ds_params = dict(
-        max_bin=63,
+        max_bin=cfg["models"]["lgbm_train"]["params"].get("max_bin", 128),
         bin_construct_sample_cnt=200000,
-        min_data_in_bin=3,
+        min_data_in_bin=cfg["models"]["lgbm_train"]["params"].get("min_data_in_bin", 1),
         data_random_seed=seed_val,
     )
     d_all = lgb.Dataset(X, label=y, weight=w, feature_name=feat_cols, free_raw_data=True, params=ds_params)
@@ -102,15 +104,20 @@ def main():
     fixed_params = dict(
         objective="regression",
         metric="None",
+        verbosity=-1,
         device_type=device,
         seed=seed_val,
-        learning_rate=lgbm_cfg.get("learning_rate", 0.05),
+        learning_rate=lgbm_cfg.get("learning_rate", 0.01),
         num_leaves=lgbm_cfg.get("num_leaves", 63),
         max_depth=lgbm_cfg.get("max_depth", 8),
         feature_fraction=lgbm_cfg.get("feature_fraction", 0.8),
         bagging_fraction=lgbm_cfg.get("bagging_fraction", 0.8),
         bagging_freq=lgbm_cfg.get("bagging_freq", 1),
         min_data_in_leaf=lgbm_cfg.get("min_data_in_leaf", 200),
+        min_sum_hessian_in_leaf=lgbm_cfg.get("min_sum_hessian_in_leaf", 1.0),
+        min_gain_to_split=lgbm_cfg.get("min_gain_to_split", 0.00),
+        lambda_l2=lgbm_cfg.get("lambda_l2", 10.0),
+        lambda_l1=lgbm_cfg.get("lambda_l1", 0.1),
     )
     print(f"[fixed] params: {fixed_params}")
 
@@ -133,19 +140,18 @@ def main():
 
         dtrain = d_base.subset(tr_idx, params=ds_params)
         dvalid = d_base.subset(va_idx, params=ds_params)
-
-        bst = lgb.train(
-            {**fixed_params, "verbosity": -1},
-            dtrain,
-            valid_sets=[dvalid],
-            valid_names=["val"],
-            feval=lgb_wr2,
-            num_boost_round=tune_rounds,
-            callbacks=[
-                lgb.early_stopping(stopping_rounds=es_rounds, verbose=False),
-                lgb.log_evaluation(period=log_period),
-            ],
-        )
+        callbacks=[lgb.early_stopping(stopping_rounds=es_rounds, verbose=False),lgb.log_evaluation(period=log_period)]
+        
+        with open(os.devnull, "w") as devnull, redirect_stderr(devnull):
+            bst = lgb.train(
+                {**fixed_params},
+                dtrain,
+                valid_sets=[dvalid, dtrain],
+                valid_names=["val", "train"],
+                feval=lgb_wr2,
+                num_boost_round=tune_rounds,
+                callbacks=callbacks,
+            )
         wr2_k = float(bst.best_score["val"]["wr2"])
         it_k = int(bst.best_iteration)
         fold_scores.append(wr2_k)
