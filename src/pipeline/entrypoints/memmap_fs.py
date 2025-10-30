@@ -32,7 +32,7 @@ def main():
     panel_root = azify(f"{cfg['azure']['root']}/{cfg['paths']['panel_shards']['rel']}")
 
     # Prefix for output files (e.g., .../fs_mm/v1)
-    prefix = os.path.join(mm_root, cfg["schema_version"])
+    prefix = os.path.join(mm_root, f"fs__{DATE_LO}-{DATE_HI}")
     
     
 

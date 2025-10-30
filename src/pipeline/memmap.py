@@ -87,11 +87,6 @@ def shard2memmap(
         "meta": f"{prefix}.meta.json",
     }
 
-#def day_ptrs_from_sorted_dates(d: np.ndarray):
-#    d = d.ravel()
-#    starts = np.r_[0, np.flatnonzero(d[1:] != d[:-1]) + 1]
-#    days   = d[starts]
-#    ends   = np.r_[starts[1:], d.size]
-#    return days, starts, ends
+
 
 

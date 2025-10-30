@@ -1,15 +1,17 @@
 # feature_select.py
 from __future__ import annotations
-import os, json, time, gc, hashlib
+import os, json, time, gc
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
-from tqdm.auto import tqdm  # ✅ 进度条
+from tqdm.auto import tqdm  
 
-from pipeline.io import cfg, P, ensure_dir_local
-from pipeline.backtest import make_sliding_cv_fast
+from pipeline.io import cfg, ensure_dir_local
+from pipeline.backtest import make_sliding_cv
+from pipeline.metrics import lgb_wr2
 
-# ---------- helpers for logging ----------
+
+# ---------- logging helpers ----------
 def _fmt_s(t: float) -> str:
     m, s = divmod(int(t), 60)
     h, m = divmod(m, 60)
@@ -30,21 +32,6 @@ def load_mm(prefix: str):
     d = np.memmap(f"{prefix}_date.int32.mmap", dtype=np.int32,   mode="r", shape=(N,))
     return meta, X, y, w, d
 
-def lgb_wr2_eval(y_pred: np.ndarray, dataset: lgb.Dataset):
-    y_true = dataset.get_label()
-    w = dataset.get_weight()
-    if w is None:
-        w = np.ones_like(y_true, dtype=np.float64)
-    # 加权 R²
-    w = w.astype(np.float64, copy=False)
-    y_true = y_true.astype(np.float64, copy=False)
-    y_pred = y_pred.astype(np.float64, copy=False)
-    w_sum = w.sum()
-    y_bar = (w * y_true).sum() / max(w_sum, 1e-12)
-    ss_res = (w * (y_true - y_pred) ** 2).sum()
-    ss_tot = (w * (y_true - y_bar) ** 2).sum()
-    wr2 = 1.0 - (ss_res / max(ss_tot, 1e-12))
-    return "wr2", float(wr2), True   # higher is better
 
 def tag_for_fs(fs_lo:int, fs_hi:int, n_splits:int, gap:int, ratio:int, seed:int, top_k:int, ts:int):
     return f"fs__{fs_lo}-{fs_hi}__cv{n_splits}-g{gap}-r{ratio}__seed{seed}__top{top_k}__{ts}"
@@ -54,32 +41,32 @@ def main():
     print(f"[{_now()}][fs] ===== Feature Selection started =====")
 
     # =========================
-    # 0) 路径
+    # 0) Paths / prefix
     # =========================
-    mm_root   = P("local", cfg["paths"]["fs_mm"])
-    prefix    = cfg["paths"]["fs_mm_prefix"]    # 与 memmap_fs.py 保持一致
-    rep_dir   = os.path.join(P("local", cfg["paths"]["reports"]), "fi")
-    featset_dir = os.path.join(P("local", cfg.get("paths", {}).get("models", "exp/v1/models")), "feature_set")
-    ensure_dir_local(rep_dir); ensure_dir_local(featset_dir)
-    print(f"[{_now()}][fs] IO ready. memmap_prefix={prefix}")
-    print(f"[{_now()}][fs] reports -> {rep_dir}")
-    print(f"[{_now()}][fs] feature_set -> {featset_dir}")
+    local_root = cfg["local"]["root"]
+    mm_root = f"{local_root}/{cfg['paths']['fs_mm']['rel']}"
+    DATE_LO = cfg["dates"]["mfs"]["date_lo"]
+    DATE_HI = cfg["dates"]["mfs"]["date_hi"]
+    prefix = os.path.join(mm_root, f"fs__{DATE_LO}-{DATE_HI}") 
+    
+    report_root = f"{local_root}/{cfg['paths']['reports']['rel']}"; ensure_dir_local(report_root)
+
 
     # =========================
-    # 1) 载入 memmap
+    # 1) Load memmap
     # =========================
     print(f"[{_now()}][fs] Loading memmap...")
     meta, X, y, w, d = load_mm(prefix)
     feat_cols = meta["features"]
-    assert np.all(np.diff(d) >= 0), "memmap d 不是非降序；请检查 panel 分片或排序"
+    assert np.all(np.diff(d) >= 0), "memmap 'date' column is not non-decreasing; check panel ordering."
     print(f"[{_now()}][fs] Loaded. N={meta['n_rows']:,}, F={meta['n_feat']}, d_range=[{int(d.min())},{int(d.max())}]")
 
     # =========================
-    # 2) 取用于筛选的日期子集
+    # 2) Select FS date subset
     # =========================
-    fs_cfg = cfg['dates']["fs_dates"]
-    fs_lo = int(fs_cfg.get("date_lo", 1250))
-    fs_hi = int(fs_cfg.get("date_hi", 1400))
+    fs_cfg = cfg["dates"]["fs"]
+    fs_lo = int(fs_cfg.get("date_lo", DATE_LO))
+    fs_hi = int(fs_cfg.get("date_hi", DATE_HI))
     print(f"[{_now()}][fs] Selecting rows in [{fs_lo}, {fs_hi}] (inclusive)...")
 
     mask = (d >= fs_lo) & (d <= fs_hi)
@@ -87,33 +74,33 @@ def main():
     if subset_idx.size == 0:
         raise ValueError(f"No rows in date range [{fs_lo}, {fs_hi}]")
     d_sub = d[subset_idx]
-    assert np.all(np.diff(d_sub) >= 0), "子集 d 非单调；请检查 memmap"
+    assert np.all(np.diff(d_sub) >= 0), "Subset 'date' column is not non-decreasing; check memmap."
     print(f"[{_now()}][fs] Subset ok: rows={subset_idx.size:,}, unique_days={np.unique(d_sub).size}, d_sub=[{int(d_sub.min())},{int(d_sub.max())}]")
 
     # =========================
-    # 3) 构建 CV
+    # 3) Build sliding CV folds
     # =========================
     print(f"[{_now()}][fs] Building sliding CV...")
     cv_cfg = cfg['cv']
     n_splits = int(cv_cfg.get("n_splits", 2))
     gap_days = int(cv_cfg.get("gap_days", 7))
-    ratio    = int(cv_cfg.get("train_to_val", 9))
+    ratio    = int(cv_cfg.get("train_to_val", 5))
 
     seed_val = int(cfg["seed"])
-    top_k    = int(cfg["lgb_select"].get("top_k", 800))
+    top_k    = int(cfg["models"]["lgbm_select"]["params"].get("select_top_k", 1000))
 
-    folds = make_sliding_cv_fast(d_sub, n_splits=n_splits, gap_days=gap_days, train_to_val=ratio)
+    folds = make_sliding_cv(d_sub, n_splits=n_splits, gap_days=gap_days, train_to_val=ratio)
     if not folds:
         raise RuntimeError("No CV folds constructed. Check cv settings and date order.")
     print(f"[{_now()}][fs] folds={len(folds)}, top_k={top_k}, seed={seed_val}")
-    # 打印每折的日期范围与样本量
+    # Log date ranges and sample sizes per fold
     for k,(tr,va) in enumerate(folds,1):
         print(f"[{_now()}][cv] fold{k}: "
               f"train_d=[{int(d_sub[tr].min())}-{int(d_sub[tr].max())}] n_tr={tr.size:,} | "
               f"val_d=[{int(d_sub[va].min())}-{int(d_sub[va].max())}] n_va={va.size:,}")
 
     # =========================
-    # 4) LightGBM 参数
+    # 4) LightGBM params
     # =========================
     ds_params = dict(
         max_bin=31,
@@ -121,11 +108,11 @@ def main():
         min_data_in_bin=3,
         data_random_seed=int(cfg['seed']),
     )
-    lgb_cfg = cfg['lgb_select']
+    lgb_cfg = cfg["models"]["lgbm_select"]["params"]
     params = dict(
         objective="regression",
         metric="None",
-        device_type=lgb_cfg.get("device_type", "gpu"),   # 如需 CPU 改为 "cpu"
+        device_type=lgb_cfg.get("device_type", "cpu"), 
         learning_rate=float(lgb_cfg.get("learning_rate", 0.05)),
         num_leaves=int(lgb_cfg.get("num_leaves", 63)),
         max_depth=int(lgb_cfg.get("max_depth", 8)),
@@ -142,20 +129,20 @@ def main():
     print(f"[{_now()}][lgb] num_boost_round={num_boost_round}, early_stopping_rounds={es_rounds}, log_period={log_period}")
 
     # =========================
-    # 5) 构造 Dataset
+    # 5) Build Dataset
     # =========================
-    print(f"[{_now()}][lgb] Building Dataset (this may take a moment)...")
+    print(f"[{_now()}][lgb] Building Dataset...")
     t_ds = time.time()
     d_all = lgb.Dataset(
         X, label=y, weight=w,
         feature_name=feat_cols,
-        free_raw_data=True,       # 构好直方图后释放原始矩阵（节省内存）
+        free_raw_data=True,
         params=ds_params,
     )
     print(f"[{_now()}][lgb] Dataset ready in {_fmt_s(time.time()-t_ds)}")
 
     # =========================
-    # 6) 多折训练（带进度条）
+    # 6) Train across folds
     # =========================
     scores = []
     fi = pd.DataFrame({"feature": feat_cols})
@@ -166,7 +153,7 @@ def main():
         print(f"[{_now()}][train] >>> fold {k}/{len(folds)} "
               f"(train={tr_idx.size:,}, val={va_idx.size:,})")
 
-        tr_g = subset_idx[tr_idx]   # ← 映射到全量行号
+        tr_g = subset_idx[tr_idx]
         va_g = subset_idx[va_idx]
 
         dtrain = d_all.subset(tr_g, params=ds_params)
@@ -176,7 +163,7 @@ def main():
             params, dtrain,
             valid_sets=[dvalid, dtrain],
             valid_names=["val", "train"],
-            feval=lgb_wr2_eval,
+            feval=lgb_wr2,
             num_boost_round=num_boost_round,
             callbacks=[
                 lgb.early_stopping(stopping_rounds=es_rounds, verbose=True),
@@ -199,7 +186,7 @@ def main():
     print(f"[{_now()}][train] All folds done. val_wr2 per fold = {[f'{s:.6f}' for s in scores]}")
 
     # =========================
-    # 7) 汇总 FI 并选特征
+    # 7) Aggregate FI & select features
     # =========================
     print(f"[{_now()}][fi] Aggregating feature importance & selecting top-k...")
     t_fi = time.time()
@@ -207,32 +194,29 @@ def main():
     fi["mean_gain_share"] = fi[fi_cols].mean(axis=1)
     fi = fi.sort_values("mean_gain_share", ascending=False, ignore_index=True)
 
-    whitelist = list(cfg.get("white_list", []))
-    fi_normal = fi[~fi["feature"].isin(whitelist)].reset_index(drop=True)
-    top_k = int(cfg["lgb_select"].get("select_top_k", 800))
-    final_feats = list(dict.fromkeys(whitelist + fi_normal["feature"].head(top_k).tolist()))
-    print(f"[{_now()}][fi] selected={len(final_feats)} (whitelist {len(whitelist)}), "
+    allowlist = list(cfg["columns"].get("allowlist", []))
+    fi_normal = fi[~fi["feature"].isin(allowlist)].reset_index(drop=True)
+    top_k = int(cfg["models"]["lgbm_select"]["params"].get("select_top_k", 800))
+    final_feats = list(dict.fromkeys(allowlist + fi_normal["feature"].head(top_k).tolist()))
+    print(f"[{_now()}][fi] selected={len(final_feats)} (including allowlist {len(allowlist)}), "
           f"top mean_gain_share={fi['mean_gain_share'].iloc[:5].round(6).tolist()} "
           f"in {_fmt_s(time.time()-t_fi)}")
 
     # =========================
-    # 8) 输出
+    # 8) Outputs
     # =========================
+
     ts  = int(time.time())
     tag = tag_for_fs(fs_lo, fs_hi, n_splits, gap_days, ratio, seed_val, top_k, ts)
-    fi_path  = os.path.join(rep_dir,   f"fi_gain_share__{tag}.csv")
-    lst_path = os.path.join(rep_dir,   f"features__{tag}.txt")
-    sum_path = os.path.join(rep_dir,   f"summary__{tag}.json")
-    lst4train = os.path.join(featset_dir, f"{tag}.txt")  # 同步一份可供训练脚本引用的清单
+    fi_path  = os.path.join(report_root,   f"fi_gain_share__{tag}.csv")
+    lst_path = os.path.join(report_root,   f"features__{tag}.txt")
+    sum_path = os.path.join(report_root,   f"summary__{tag}.json")
 
-    print(f"[{_now()}][out] Writing FI list -> {fi_path}")
+    print(f"[{_now()}][out] Saving feature importance -> {fi_path}")
     fi[["feature", "mean_gain_share"]].to_csv(fi_path, index=False)
 
-    print(f"[{_now()}][out] Writing feature list -> {lst_path} (and {lst4train})")
+    print(f"[{_now()}][out] Saving feature list -> {lst_path}")
     with open(lst_path, "w", encoding="utf-8") as f:
-        for x in final_feats:
-            f.write(f"{x}\n")
-    with open(lst4train, "w", encoding="utf-8") as f:
         for x in final_feats:
             f.write(f"{x}\n")
 
@@ -244,10 +228,9 @@ def main():
         "n_rows": int(meta["n_rows"]),
         "n_feat": int(meta["n_feat"]),
         "selected_features": len(final_feats),
-        "whitelist": whitelist,
+        "whitelist": allowlist,
         "fi_csv": fi_path,
         "features_txt": lst_path,
-        "features_txt_for_training": lst4train,
         "train_range": [int(fs_lo), int(fs_hi)],
         "cv": {"n_splits": n_splits, "gap_days": gap_days, "train_to_val": ratio},
         "lgb_params": params,
@@ -262,7 +245,7 @@ def main():
 
     print(f"[{_now()}][fs][done] mean_wr2={summary['cv_mean_wr2']:.6f}  (±{summary['cv_std_wr2']:.6f})")
     print(f"[{_now()}][fs][done] FI -> {fi_path}")
-    print(f"[{_now()}][fs][done] features -> {lst_path} (and {lst4train})")
+    print(f"[{_now()}][fs][done] features -> {lst_path}")
     print(f"[{_now()}][fs][done] summary -> {sum_path}")
     print(f"[{_now()}][fs] ===== Finished in {_fmt_s(time.time()-t0)} =====")
 

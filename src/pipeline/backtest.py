@@ -1,8 +1,15 @@
 from __future__ import annotations
 import numpy as np
 
+def day_ptrs_from_sorted_dates(d: np.ndarray):
+    d = d.ravel()
+    starts = np.r_[0, np.flatnonzero(d[1:] != d[:-1]) + 1]
+    days   = d[starts]
+    ends   = np.r_[starts[1:], d.size]
+    return days, starts, ends
 
-def make_sliding_cv_fast(date_ids: np.ndarray, *, n_splits: int, gap_days: int = 5, train_to_val: int = 9):
+
+def make_sliding_cv(date_ids: np.ndarray, *, n_splits: int, gap_days: int = 5, train_to_val: int = 9):
     days, starts, ends = day_ptrs_from_sorted_dates(date_ids)
     N, R, K, G = len(days), int(train_to_val), int(n_splits), int(gap_days)
     usable = N - G
