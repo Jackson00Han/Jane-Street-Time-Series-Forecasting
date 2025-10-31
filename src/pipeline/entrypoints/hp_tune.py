@@ -1,14 +1,16 @@
-# This is an advanced option: using Optuna hyperparameter search to improve LightGBM model performance. If time allows, it is recommended to explore various hyperparameter configurations for optimal results.
+# This is an advanced option:
+# If time allows, using Optuna hyperparameter search to improve LightGBM model performance. It is recommended to explore various hyperparameter configurations for optimal results.
+# In this project, I didn't used it since it was time-consuming to run.
+
+
 from __future__ import annotations
 import os, json, time, gc
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
 import optuna
 from tqdm.auto import tqdm
-
 from pipeline.io import cfg, ensure_dir_local
 from pipeline.backtest import make_sliding_cv            # ← unified CV helper
 from pipeline.metrics import lgb_wr2                     # ← unified metric (feval)

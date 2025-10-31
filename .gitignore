@@ -1,27 +1,55 @@
-# Python
+# --- Python ---
 __pycache__/
 *.pyc
 .venv/
 .env
 .envrc
+.pytype/
+.python-version
 
-# VSCode / Jupyter
+# --- Editors / IDEs ---
 .vscode/
+.idea/
+.history/
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+
+# --- Notebooks ---
 .ipynb_checkpoints/
 
-# ---- 数据与大文件（全部排除）----
-/mnt/data/js/raw/
-/mnt/data/js/clean/
-/mnt/data/js/cache/
-/mnt/data/js/exp/*/raw_shards/
-/mnt/data/js/exp/*/fe_shards/
-/mnt/data/js/exp/*/mm_shards/
-/mnt/data/js/exp/*/mm/
-/mnt/data/js/exp/*/tmp/
-/mnt/data/js/exp/*/models/*  # 如需把 meta.json 入库，可在下一节里“例外”包含它
-/mnt/data/js/exp/*/reports/
+# --- Build / Packaging ---
+dist/
+build/
+*.egg-info/
 
-# 模型与缓存
+# --- Testing / QA / Caches ---
+.pytest_cache/
+.coverage*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Large data artifacts ---
+reports/
+models/
+train_mm/
+cache/
+tmp/
+lgbm/
+fs_mm/
+tft/
+panel_shards/
+fe_shards/
+clean_shards/
+
+# --- Binary / data formats commonly generated ---
 *.mmap
 *.bin
 *.parquet
@@ -29,14 +57,10 @@ __pycache__/
 *.pkl
 *.npz
 *.npy
-*.log
 
-# ---- 允许版本内配置被跟踪（反向包含）----
-!/mnt/data/js/exp/*/config/
-!/mnt/data/js/exp/*/config/**
+# --- Secrets / Keys (safety) ---
+*.pem
+*.key
+id_rsa*
 
-# 如果你希望把 meta.json 也纳入 Git（可选）：
-!/mnt/data/js/exp/*/models/meta.json
 
-# 如果想把报告的指标 csv 入库（可选）：
-!/mnt/data/js/exp/*/reports/metrics.csv

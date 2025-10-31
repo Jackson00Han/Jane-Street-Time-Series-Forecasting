@@ -2,7 +2,7 @@
 
 A practical pipeline for the Jane Street 2024-style intraday time-series task. It covers data cleaning → feature engineering → panelization → memmap building → LightGBM CV training → reporting. Designed for very large datasets (30M+ rows; 1k+ features) with strict causal handling. 
 
-Additionally, I also tried TFT model, since it was very much time consuming, any new progress about it will be updated in the experiments.
+In addition, I experimented with a Temporal Fusion Transformer (TFT). Because training is computationally expensive at this scale, ongoing results are tracked in the Experiments section and will be updated over time.
 
 ## Highlights
 
@@ -59,7 +59,8 @@ JS/
 │     ├─ preprocess.py
 │     ├─ validate.py
 │     └─ __init__.py
-├─ .env #(not published)
+├─ .env
+├─ .gitignore
 ├─ pyproject.toml
 ├─ README.md
 └─ uv.lock
