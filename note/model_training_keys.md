@@ -39,7 +39,7 @@ Below is a 6-layer, plug-and-play stack for large-scale training that’s **prac
 
 ---
 
-## Practical Recipe: Wide Multivariate Time Series with **TFT**
+# Practical Recipe: Wide Multivariate Time Series with **TFT**
 1. **Storage & ingest**  
    - Write time-/hash-sharded **Parquet/Arrow** (daily/weekly, 100–500 MB).  
    - Precompute: z-scores per group, rolling means/std, lags/leads, calendar flags, target encodings (leak-safe).  
