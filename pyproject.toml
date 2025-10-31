@@ -32,10 +32,8 @@ js-panel             = "pipeline.entrypoints.panel:main"
 js-memmap-fs         = "pipeline.entrypoints.memmap_fs:main"
 js-feature-selection = "pipeline.entrypoints.feature_selection:main"
 js-memmap-after-fs   = "pipeline.entrypoints.memmap_after_fs:main"
-js-tune-fixed        = "pipeline.entrypoints.tune_fixed:main"
-js-tune              = "pipeline.entrypoints.tune:main"
-js-best-iteration    = "pipeline.entrypoints.best_iteration:main"
-js-final-train       = "pipeline.entrypoints.final_train:main"
+js-train              = "pipeline.entrypoints.main_train:main"
+
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
