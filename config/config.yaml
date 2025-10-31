@@ -75,7 +75,7 @@ dates:
   mfs:    { date_lo: 1400, date_hi: 1698 }
   fs:     { date_lo: 1400, date_hi: 1698 }
   mtrain: { date_lo: 830,  date_hi: 1698 }
-  train:   { date_lo: 900,  date_hi: 1698 }
+  train:   { date_lo: 1660,  date_hi: 1698 }
 
 # -----------------------------
 # Cross-validation (non-backtest simple CV)
