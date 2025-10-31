@@ -24,7 +24,3 @@ sleep 2
 pgrep -af "ipykernel|jupyter-(notebook|lab)" || echo "clean"
 pkill -KILL -f "ipykernel|jupyter-(notebook|lab)"   # last resort
 
-## Optional sanity checks (limits / cgroups)
-ulimit -a
-cat /proc/meminfo | egrep "MemAvailable|Swap"
-[ -f /sys/fs/cgroup/memory.max ] && cat /sys/fs/cgroup/memory.max
