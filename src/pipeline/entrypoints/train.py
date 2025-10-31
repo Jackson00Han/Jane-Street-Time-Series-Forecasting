@@ -164,7 +164,7 @@ def main():
         gc.collect()
 
     mean_wr2 = float(np.mean(fold_scores))
-    print(f"[fixed] mean_wr2={mean_wr2:.6f} | per-fold={np.round(fold_scores, 6)}")
+    print(f"\n[fixed] mean_wr2={mean_wr2:.6f} | per-fold={np.round(fold_scores, 6)}")
 
     ts = int(time.time())
     tag = f"train_range{lo}_{hi}__cv{n_splits}_g{gap_days}_r{ratio}__{ts}"
