@@ -30,8 +30,6 @@ git switch dev
 git fetch origin
 git rebase origin/dev
 git switch -c feature/xxx
-
-
 ```
 
 ## 5.During development

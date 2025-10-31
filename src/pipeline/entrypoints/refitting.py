@@ -1,5 +1,5 @@
     # =========================
-    # 8) Refit on full window & save model
+    # Based on CV results, Refitting on full window & saving model
     # =========================
     final_dir = os.path.join(model_dir, "final"); ensure_dir_local(final_dir)
     final_rounds = max(50, int(np.mean(best_iters) * 1.10))  # 1.10 为安全放大系数
