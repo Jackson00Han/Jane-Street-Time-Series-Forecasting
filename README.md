@@ -66,3 +66,49 @@ JS/
 └─ uv.lock
 ```
 
+## Environment & Reproducibility
+
+- Using uv (recommended)
+```bash
+python -m venv .venv && source .venv/bin/activate
+uv sync
+uv pip install -e .
+```
+
+
+## Quick Start
+
+If you don‘t want to spend time on data preprocessing and prefer focusing on hyperparameter tuning, you can use my preprocessed memmap on Kaggle (link). All you need to do is go to config/config.yaml, and update the feature_list_path and train_mm by your path. 
+
+For example, you may replace the item of the feature_list_path with the item of the quick_feature_list_path -- "/reports/features__fs__1400-1698__cv1-g7-r4__seed42__top1000__1761771286.txt"
+
+Then, set a short window in the config and run 
+```bash
+js-train
+```
+
+## If you prefer running the complete process (CLI)
+Minimal edits: make sure config/config.yaml has correct azure.root / local.root
+```
+# 0) Raw → cleaned shards (optional if you already have clean data)
+js-clean
+
+# 1) Feature engineering (Stages A/B/C → fe_shards/)
+js-fe
+
+# 2) Panelization (join shards, causal ordering → panel_shards/)
+js-panel
+
+# 3) Memmap matrix (build small dataset with all features)
+js-memmap-fs
+
+# 4) train model to select important features on a small dataset
+js-feature-selection
+
+# 5) Memmap matrix (build full dataset with selected features)
+js-memmap-after_fs
+
+# 6) train model on full data with selected features 
+js-train
+
+```
