@@ -62,7 +62,7 @@ derived_paths:
 
   feature_list_path: "/mnt/data/js/v1/reports/features__fs__1400-1698__cv1-g7-r4__seed42__top1000__1761771286.txt" # get it from the report after feature selection.
   # For quick test, you can download mine and save it locally and use quick_feature_list_path:
-  quick_feature_list_path: "/reports/features__fs__1400-1698__cv1-g7-r4__seed42__top1000__1761771286.txt" 
+  quick_feature_list_path: "/reports/features__fs__1400-1698__cv1-g7-r4__seed42__top1000__1761771286.txt" # your local path for feature list
 
   train_mm: "/mnt/data/js/v1/train_mm/full_train__features__features__fs__1400-1698__cv1-g7-r4__seed42__top1000__1761771286__range830-1698" # get it from the output of memmap_after_fs step. 
   # For quick test, you can download mine from Kaggle and save it locally. Use quick_train_mm:
