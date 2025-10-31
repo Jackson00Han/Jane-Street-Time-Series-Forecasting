@@ -1,20 +1,14 @@
 from __future__ import annotations
-import os, re, json, time, math, signal
+import os, re, json, time, signal
 import polars as pl
 from tqdm.auto import tqdm
 
-from pipeline.io import cfg, fs, storage_options, P, ensure_dir_local
+from pipeline.io import cfg, fs, storage_options, ensure_dir_local
 from pipeline.memmap import shard2memmap
 
 # ---------- helpers ----------
 def azify(p: str) -> str:
     return p if p.startswith("az://") else f"az://{p}"
-
-def to_int(x, name):
-    try:
-        return int(str(x).strip())
-    except Exception as e:
-        raise ValueError(f"{name} 不是整数，可解析的值：{x!r}") from e
 
 def shard_key(path: str):
     m = re.search(r"panel_(\d+)_(\d+)\.parquet$", path)
@@ -25,22 +19,24 @@ def shard_key(path: str):
 
 # ---------- main ----------
 def main():
-    # 0) 配置 & 路径
-    date_cfg = cfg["dates"]["mfs_dates"]
-    DATE_LO = to_int(date_cfg.get("date_lo", 1300), "date_lo")
-    DATE_HI = to_int(date_cfg.get("date_hi", 1500), "date_hi")
-    if DATE_LO > DATE_HI:
-        raise ValueError(f"date_lo({DATE_LO}) > date_hi({DATE_HI})，请检查配置")
-
-    mm_root = P("local", cfg["paths"]["fs_mm"])
-    ensure_dir_local(mm_root)
-    prefix = os.path.join(mm_root, "full_sample_v1")
-
-    panel_root = azify(P("az", cfg["paths"]["panel_shards"]))
-    print(f"[memmap] panel_root = {panel_root}")
+    # 0) Config & paths
+    DATE_LO = cfg["dates"]["mfs"]["date_lo"]
+    DATE_HI = cfg["dates"]["mfs"]["date_hi"]
     print(f"[memmap] target date range (inclusive) = [{DATE_LO}, {DATE_HI}]")
 
-    # 1) 列出需要的分片（与区间相交）
+    local_root = cfg["local"]["root"]
+    mm_root = f"{local_root}/{cfg['paths']['fs_mm']['rel']}"
+    ensure_dir_local(mm_root)
+
+    # panels live in Azure: azure.root + paths.panel_shards.rel
+    panel_root = azify(f"{cfg['azure']['root']}/{cfg['paths']['panel_shards']['rel']}")
+
+    # Prefix for output files (e.g., .../fs_mm/v1)
+    prefix = os.path.join(mm_root, f"fs__{DATE_LO}-{DATE_HI}")
+    
+    
+
+    # 1) List shards overlapping the target date range
     all_panels = sorted([azify(p) for p in fs.glob(f"{panel_root}/panel_*.parquet")], key=shard_key)
     panel_paths: list[str] = []
     skipped = 0
@@ -50,7 +46,7 @@ def main():
             skipped += 1
             continue
         lo, hi = map(int, m.groups())
-        if hi >= DATE_LO and lo <= DATE_HI:
+        if hi >= DATE_LO and lo <= DATE_HI:  # overlap check
             panel_paths.append(p)
 
     if not panel_paths:
@@ -62,22 +58,24 @@ def main():
     print(f"[memmap] shards selected = {len(panel_paths)} / {len(all_panels)}")
     print(f"[memmap] first shard = {os.path.basename(panel_paths[0])}, last shard = {os.path.basename(panel_paths[-1])}")
 
-    # 2) 抽样读取 schema（确保列集一致）
-    sample_path = panel_paths[0] #这个选择不好， 但先这样
+    # 2) Sample schema to determine core/feature columns
+    sample_path = panel_paths[0]
     print(f"sample_path: {sample_path}")
     schema = pl.scan_parquet(sample_path, storage_options=storage_options).collect_schema()
     names = schema.names()
     print(f"feat number: {len(names)}")
-    keys   = tuple(cfg["keys"])      # e.g. ('symbol_id','date_id','time_id')
-    target = cfg["target"]           # e.g. 'responder_6'
-    weight = cfg["weight"]           # e.g. 'weight'
+    
+    # Read keys/target/weight from config.columns
+    keys   = tuple(cfg["columns"]["keys"])      # e.g. ('symbol_id','date_id','time_id')
+    target = cfg["columns"]["target"]          # e.g. 'responder_6'
+    weight = cfg["columns"]["weight"]           # e.g. 'weight'
 
-    # 校验关键列存在
+    # Validate presence of core columns
     missing_core = [c for c in [*keys, target, weight] if c not in names]
     if missing_core:
         raise RuntimeError(f"核心列缺失: {missing_core} in {sample_path}")
 
-    # 特征列全集（保持原顺序，排除 keys/target/weight）
+    # Feature columns = all minus keys/target/weight (preserve original order)
     feat_cols = [c for c in names if c not in (*keys, target, weight)]
     if not feat_cols:
         raise RuntimeError("未检测到任何特征列（除去 keys/target/weight 之后为空）")
@@ -85,26 +83,22 @@ def main():
     print(f"[memmap] features detected = {len(feat_cols)} (excluding keys/target/weight)")
     print(f"[memmap] keys={keys}, target={target}, weight={weight}")
 
-    # 3) 统计每个分片的行数 & 日期范围（可视化进度）
+    # 3) Scan shard stats (row count and date range) for logging/meta
     shard_stats = []
-    t0 = time.time()
     print("[memmap] scanning shard stats...")
     for p in tqdm(panel_paths, desc="scan shards", unit="shard"):
-        # 仅取必要列加速
-        lb = pl.scan_parquet(p, storage_options=storage_options).select([keys[1]])  # date_id
+        lb = pl.scan_parquet(p, storage_options=storage_options).select([keys[1]])  # date_id only
         cnt = lb.select(pl.len()).collect(streaming=True).item()
-        # 取 min/max date（两次聚合合并成一次）
         s = lb.select(pl.min(keys[1]).alias("dmin"), pl.max(keys[1]).alias("dmax")).collect(streaming=True)
         dmin, dmax = int(s["dmin"][0]), int(s["dmax"][0])
         shard_stats.append((p, cnt, dmin, dmax))
-    print(f"[memmap] shard stats done in {time.time()-t0:.1f}s")
     total_rows = int(sum(c for _, c, _, _ in shard_stats))
     d_min = min(d0 for _, _, d0, _ in shard_stats)
     d_max = max(d1 for _, _, _, d1 in shard_stats)
-    print(f"[memmap] total rows (raw, all selected shards) = {total_rows:,}")
+    print(f"[memmap] total rows across selected shards = {total_rows:,}")
     print(f"[memmap] available date range from selected shards = [{d_min}, {d_max}]")
 
-    # 4) 写 memmap（带“优雅终止”）
+    # 4) Write memmap
     stop = {"flag": False}
     def _stop(sig, frame):
         stop["flag"] = True
@@ -120,12 +114,10 @@ def main():
         date_col=keys[1],     # 'date_id'
         target_col=target,
         weight_col=weight,
-        # 如果你的 shard2memmap 支持以下可选参数，可解开以进一步可视化：
-        # progress=True, on_shard_done=callback, stop_flag=stop,
     )
     print("[memmap] files written:", mm_paths)
 
-    # 5) 写 meta.json（更丰富，便于后续自检）
+    # 5) Build-time meta (for quick self-checks)
     meta = {
         "n_rows_raw": total_rows,
         "n_feat": len(feat_cols),
@@ -146,7 +138,7 @@ def main():
         json.dump(meta, f, indent=2)
     print(f"[memmap] build meta -> {meta_path}")
 
-    # 6) 事后快速自检：打开你 downstream 的 meta 看“真值”
+    # 6) Post-check: read the memmap's own meta if available
     try:
         with open(f"{prefix}.meta.json", "r", encoding="utf-8") as f:
             real = json.load(f)

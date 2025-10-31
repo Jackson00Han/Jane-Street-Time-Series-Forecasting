@@ -6,40 +6,39 @@ from pathlib import Path
 import yaml, fsspec
 from dotenv import load_dotenv
 
-# ---------- 1) 仓库根：向上寻找 pyproject.toml ----------
-def _repo_root(start: Path) -> Path:
-    p = start.resolve()
-    for _ in range(8):  # 往上最多找 8 层
-        if (p / "pyproject.toml").exists():
-            return p
-        p = p.parent
-    # 兜底：如果没找到，就退回到 src/../../
-    return start.resolve().parents[2]
+def find_project_root(
+    start: str | Path | None = None,
+    markers=("pyproject.toml", ".git", "config"),
+) -> Path:
+    """
+    Find project root by walking up from `start` (default: CWD).
+    Returns the first directory that contains any of the `markers`.
+    """
+    if start is None:
+        # in scripts __file__ exists; in notebooks use CWD
+        start = Path.cwd()
+    else:
+        start = Path(start).resolve()
 
-ROOT = _repo_root(Path(__file__).parent)
+    for parent in [start, *start.parents]:
+        for m in markers:
+            if (parent / m).exists():
+                return parent
+    return start  # fallback: stay where you are
 
-# ---------- 2) 环境与配置 ----------
-# 先加载仓库根的 .env（若存在）
-load_dotenv(ROOT / ".env", override=True)
+# optional: allow override via env var
+ROOT = Path(find_project_root())
 
-# 允许通过环境变量覆盖配置位置（例如 JS_CONFIG=/path/to/data.yaml）
-CFG_PATH = Path(os.getenv("JS_CONFIG") or (ROOT / "config" / "data.yaml"))
-if not CFG_PATH.exists():
-    raise FileNotFoundError(f"配置文件不存在: {CFG_PATH}")
+# ---------- 1) Azure 存储配置 ----------
+path_env = f"{ROOT}/.env"
+load_dotenv(dotenv_path=path_env, override=False)  # 读取 .env 到环境变量（若没有 .env 也不报错）
 
-with open(CFG_PATH, "r", encoding="utf-8") as f:
-    cfg: dict = yaml.safe_load(f)
-
-# ---------- 3) Azure 凭据（保持你的“只用账号+密钥”的策略） ----------
-# 避免误用连接串/SAS（清掉可能残留的变量）
 os.environ.pop("AZURE_STORAGE_CONNECTION_STRING", None)
 os.environ.pop("AZURE_STORAGE_SAS_TOKEN", None)
-
 ACC = (os.getenv("AZURE_STORAGE_ACCOUNT_NAME") or "").strip()
 KEY = (os.getenv("AZURE_STORAGE_ACCOUNT_KEY") or "").strip()
 if not ACC or not KEY:
     raise RuntimeError("请在 .env 或环境变量中设置 AZURE_STORAGE_ACCOUNT_NAME / AZURE_STORAGE_ACCOUNT_KEY")
-
 # 提前校验 Key（能早发现粘贴/截断问题）
 base64.b64decode(KEY, validate=True)
 
@@ -47,40 +46,24 @@ storage_options = {"account_name": ACC, "account_key": KEY}
 
 @lru_cache(maxsize=1)
 def get_fs():
-    storage_options = {"account_name": ACC, "account_key": KEY}
     return fsspec.filesystem("az", **storage_options)
+fs = get_fs()
 
-fs = get_fs()  # 与旧代码兼容：仍然暴露 fs 变量
-
-# ---------- 4) 路径助手 ----------
-def P(kind: str, subpath: str = "") -> str:
-    """
-    kind: 'az' | 'np' | 'local'
-      - az:   az://container/prefix/exp_root[/sub]
-      - np:   container/prefix/exp_root[/sub]   (不带协议，供 numpy.save 等)
-      - local: <cfg.local.root>/<exp_root>[/sub]
-    """
-    container = str(cfg["blob"]["container"]).strip("/")
-    prefix    = str(cfg["blob"]["prefix"]).strip("/")
-    version   = str(cfg["exp_root"]).strip("/")
-    sub       = str(subpath).strip("/")
-
-    if kind == "az":
-        base = f"az://{container}" + (f"/{prefix}" if prefix else "") + f"/{version}"
-        return f"{base}/{sub}" if sub else base
-    if kind == "np":
-        base = f"{container}" + (f"/{prefix}" if prefix else "") + f"/{version}"
-        return f"{base}/{sub}" if sub else base
-    if kind == "local":
-        base = (Path(cfg["local"]["root"]) / version).as_posix()
-        return f"{base}/{sub}" if sub else base
-    raise ValueError("kind must be 'az', 'np', or 'local'")
-
-# ---------- 5) 目录确保存在 ----------
-def ensure_dir_local(path: str | os.PathLike) -> None:
-    Path(path).mkdir(parents=True, exist_ok=True)
-
+# 创建 Azure 路径对应的目录
 def ensure_dir_az(path: str) -> None:
     # 兼容 'az://container/...' 或 'container/...'
     p = path[5:] if isinstance(path, str) and path.startswith("az://") else path
-    get_fs().makedirs(p, exist_ok=True)
+    fs.makedirs(p, exist_ok=True)
+
+# ---------- 2) 配置文件加载 ----------
+path_cfg = f"{ROOT}/config/config.yaml"
+def load_cfg(path: str = "config.yaml") -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+cfg = load_cfg(path_cfg)
+
+
+# ---------- 3) 创建本地路径 ----------
+def ensure_dir_local(path: str) -> None:
+    Path(path).mkdir(parents=True, exist_ok=True)
+

@@ -25,7 +25,7 @@ dependencies = [
   "tensorboard>=2.20.0",
 ]
 
-[project.scripts]                         # 每个步骤一个命令（安装后即用）
+[project.scripts]
 js-clean             = "pipeline.entrypoints.clean:main"
 js-fe                = "pipeline.entrypoints.fe:main"
 js-panel             = "pipeline.entrypoints.panel:main"

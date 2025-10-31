@@ -18,6 +18,10 @@ def rolling_sigma_clip(
     cast_float32: bool = True,
     sanitize: bool = True,
 ) -> pl.LazyFrame:
+    """
+    Rolling z-score clipping using lagged values (causal).
+    Requires the input to be pre-sorted by ['symbol_id', 'date_id', 'time_id'].
+    """
     if not is_sorted:
         raise ValueError("Input LazyFrame must be pre-sorted by ['symbol_id','date_id','time_id']")
 
@@ -26,7 +30,6 @@ def rolling_sigma_clip(
     missing = list(required - names)
     if missing:
         raise KeyError(f"Missing columns: {missing}")
-
 
     base = lf.select(pl.col(["symbol_id","date_id","time_id","time_bucket"] + list(clip_features)))
     min_need = max(min_valid, ddof + 1)
@@ -39,11 +42,8 @@ def rolling_sigma_clip(
             x = x.cast(pl.Float32)
         if sanitize:
             x = pl.when(x.is_finite()).then(x).otherwise(None)
+        xlag = x.shift(1)  # causal: use previous tick
 
-        # 注意：这里不要 over
-        xlag = x.shift(1)
-
-        # 只在 rolling 结果上 over（组内历史）
         cnt = (
             xlag.is_not_null()
                 .cast(pl.Int32)
@@ -69,7 +69,6 @@ def rolling_sigma_clip(
     return base.with_columns(exprs)
 
 
-
 def causal_impute(
     lf: pl.LazyFrame,
     impute_cols: Sequence[str],
@@ -80,21 +79,26 @@ def causal_impute(
     ttl_days_same_tick: Optional[int] = 5,
     is_sorted: bool = False,
 ) -> pl.LazyFrame:
+    """
+    Causal imputation:
+      1) At market open: carry over last known value across days with TTL.
+      2) Intra-day forward fill within (symbol, date), with optional max-gap in ticks.
+      3) Same time_id cross-day carry with TTL.
+      4) Intra-day forward fill again to propagate.
+    Requires the input to be pre-sorted by ['symbol_id', 'date_id', 'time_id'].
+    """
     if not is_sorted:
         raise ValueError("Input LazyFrame must be pre-sorted by ['symbol_id','date_id','time_id']")
 
-    # 参数合法性
     assert intra_ffill_max_gap_ticks is None or intra_ffill_max_gap_ticks >= 0
     assert ttl_days_same_tick is None or ttl_days_same_tick >= 0
 
-    # 统一 dtype（可选，但更稳）
     lf = lf.with_columns([pl.col(c).cast(pl.Float32) for c in impute_cols])
-    
-    
+
     t0, t1 = open_tick_window
     is_open = pl.col("time_id").is_between(t0, t1, closed="left")  # [t0, t1)
 
-    # ---- 1) 开盘：跨日承接（TTL）----
+    # ---- 1) Market open: cross-day carry with TTL ----
     open_exprs = []
     for c in impute_cols:
         last_date = (
@@ -104,8 +108,8 @@ def causal_impute(
         cand = pl.col(c).forward_fill().over("symbol_id")
         gap  = (pl.col("date_id") - last_date).cast(pl.Int32)
         open_exprs.append(
-            pl.when(is_open 
-                    & pl.col(c).is_null() 
+            pl.when(is_open
+                    & pl.col(c).is_null()
                     & (gap.fill_null(ttl_days_open + 1) <= ttl_days_open))
             .then(cand)
             .otherwise(pl.col(c))
@@ -113,7 +117,7 @@ def causal_impute(
         )
     lf1 = lf.with_columns(open_exprs)
 
-    # ---- 2) 日内 ffill（(symbol,date)），可限步数 ----
+    # ---- 2) Intra-day forward fill within (symbol, date), optional max tick-gap ----
     if intra_ffill_max_gap_ticks is None:
         lf2 = lf1.with_columns([pl.col(c).forward_fill().over(["symbol_id","date_id"]).alias(c) for c in impute_cols])
     else:
@@ -134,7 +138,7 @@ def causal_impute(
             )
         lf2 = lf1.with_columns(exprs)
 
-    # ---- 3) 同一 time_id 跨日承接（TTL，可选）----
+    # ---- 3) Same time_id cross-day carry with TTL ----
     lf3 = lf2
     if ttl_days_same_tick is not None:
         d = ttl_days_same_tick
@@ -154,7 +158,7 @@ def causal_impute(
             )
         lf3 = lf2.with_columns(exprs)
 
-    # ---- 4) 再日内 ffill 传播（与步骤2同逻辑）----
+    # ---- 4) Intra-day forward fill again to propagate ----
     if intra_ffill_max_gap_ticks is None:
         lf4 = lf3.with_columns([pl.col(c).forward_fill().over(["symbol_id","date_id"]).alias(c) for c in impute_cols])
     else:
@@ -177,4 +181,3 @@ def causal_impute(
 
     KEYS = ["symbol_id","date_id","time_id"]
     return lf4.select([*KEYS, *impute_cols])
-
