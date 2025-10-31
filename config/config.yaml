@@ -35,7 +35,7 @@ seed: 42
 # I/O & storage
 # -----------------------------
 azure: 
-  root: "jackson/js_exp" # for raw data, big intermediate artifacts-- preprocessed data, cleaned shards, feature-engineered shards, etc.
+  root: "jackson/js_exp" # Raw data is saved here. For big intermediate artifacts-- preprocessed data, cleaned shards, feature-engineered shards, etc.
 local:
   root: "/mnt/data/js/v1" # for small data: well preprocessed data, models, and reports cache
 
