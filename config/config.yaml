@@ -59,11 +59,14 @@ paths:
 
 # derived absolute paths (keep your original absolute defaults; can be templated)
 derived_paths:
-  feature_list_path: "/mnt/data/js/v1/reports/features__fs__1400-1698__cv1-g7-r4__seed42__top1000__1761771286.txt" # get it from the report after feature selection
-  train_mm: "/mnt/data/js/v1/train_mm/full_train__features__features__fs__1400-1698__cv1-g7-r4__seed42__top1000__1761771286__range830-1698" # get it from the output of memmap_after_fs step
 
-# optionally keep the selected features csv path (original)
-lgbm_selected_features_path: "/mnt/data/js/exp/v1/models/tune/feature_importance__fixed__fixed__mm_full_train__features__fs__1400-1698__cv2-g7-r4__seed42__top1000__1760906660__range830-1698__range830-1698__cv2-g7-r4__1760912739.csv"
+  feature_list_path: "/mnt/data/js/v1/reports/features__fs__1400-1698__cv1-g7-r4__seed42__top1000__1761771286.txt" # get it from the report after feature selection.
+  # For quick test, you can download mine and save it locally and use quick_feature_list_path:
+  quick_feature_list_path: "/reports/features__fs__1400-1698__cv1-g7-r4__seed42__top1000__1761771286.txt" 
+
+  train_mm: "/mnt/data/js/v1/train_mm/full_train__features__features__fs__1400-1698__cv1-g7-r4__seed42__top1000__1761771286__range830-1698" # get it from the output of memmap_after_fs step. 
+  # For quick test, you can download mine from Kaggle and save it locally. Use quick_train_mm:
+  quick_train_mm: "your local path for train_mm" 
 
 # -----------------------------
 # Date ranges (by logical purpose)
