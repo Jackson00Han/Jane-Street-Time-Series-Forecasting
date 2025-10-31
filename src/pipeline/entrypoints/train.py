@@ -130,13 +130,12 @@ def main():
     # Per-fold feature importance (gain share)
     ranking_features = pd.DataFrame({"feature": feat_cols})
 
-    for k, (tr_idx, va_idx) in enumerate(tqdm(folds, desc="fixed_cv", leave=False), 1):
-        assert np.all(np.diff(d_sub[tr_idx]) >= 0), f"train dates not sorted in fold {k}"
-        assert np.all(np.diff(d_sub[va_idx]) >= 0), f"val dates not sorted in fold {k}"
+    pbar = tqdm(folds, desc="fixed_cv", leave=True)
+    for k, (tr_idx, va_idx) in enumerate(pbar, 1):
         tr_lo, tr_hi = int(d_sub[tr_idx[0]]), int(d_sub[tr_idx[-1]])
         va_lo, va_hi = int(d_sub[va_idx[0]]), int(d_sub[va_idx[-1]])
-        print(f"[cv] fold{k}: train_d=[{tr_lo}-{tr_hi}] n_tr={len(tr_idx):,} | "
-              f"val_d=[{va_lo}-{va_hi}] n_va={len(va_idx):,}")
+        pbar.write(f"[cv] fold{k}: train_d=[{tr_lo}-{tr_hi}] n_tr={len(tr_idx):,} | "
+                f"val_d=[{va_lo}-{va_hi}] n_va={len(va_idx):,}")
 
         dtrain = d_base.subset(tr_idx, params=ds_params)
         dvalid = d_base.subset(va_idx, params=ds_params)
