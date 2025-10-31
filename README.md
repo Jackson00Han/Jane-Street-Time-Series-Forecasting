@@ -1,6 +1,6 @@
 # Jane Street Market TimeSeries Data Forecasting --GBM/Transformer
 
-A practical pipeline for the Jane Street 2024-style intraday time-series task. It covers data cleaning → feature engineering → panelization → memmap building → LightGBM CV training → reporting. Designed for very large datasets (30M+ rows; 1k+ features) with strict causal handling. 
+A practical pipeline for the Jane Street time-series market data forecasting competition on Kaggle. It covers data cleaning → feature engineering → panelization → memmap building → LightGBM CV training → reporting. Designed for very large datasets (30M+ rows; 1k+ features) with strict causal handling. 
 
 In addition, I experimented with a Temporal Fusion Transformer (TFT). Because training is computationally expensive at this scale, ongoing results are tracked in the Experiments section and will be updated over time. At this stage, TFT is not yet production-ready for this project. But you are welcome to reach out to me if you find any interesting results.
 
