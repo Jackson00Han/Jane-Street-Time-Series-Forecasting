@@ -36,19 +36,6 @@ htmlcov/
 *.log
 logs/
 
-# --- Large data artifacts ---
-reports/
-models/
-train_mm/
-cache/
-tmp/
-lgbm/
-fs_mm/
-tft/
-panel_shards/
-fe_shards/
-clean_shards/
-
 # --- Binary / data formats commonly generated ---
 *.mmap
 *.bin
