@@ -35,7 +35,7 @@ JS/
 │     │  ├─ memmap_after_fs.py
 │     │  ├─ memmap_fs.py
 │     │  ├─ panel.py
-│     │  └─ train.py
+│     │  └─ main_train.py
 │     ├─ backtest.py
 │     ├─ features.py
 │     ├─ io.py
