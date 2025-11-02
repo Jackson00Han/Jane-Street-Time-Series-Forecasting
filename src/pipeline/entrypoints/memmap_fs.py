@@ -73,12 +73,12 @@ def main():
     # Validate presence of core columns
     missing_core = [c for c in [*keys, target, weight] if c not in names]
     if missing_core:
-        raise RuntimeError(f"核心列缺失: {missing_core} in {sample_path}")
+        raise RuntimeError(f"Missing core columns: {missing_core} in {sample_path}")
 
     # Feature columns = all minus keys/target/weight (preserve original order)
     feat_cols = [c for c in names if c not in (*keys, target, weight)]
     if not feat_cols:
-        raise RuntimeError("未检测到任何特征列（除去 keys/target/weight 之后为空）")
+        raise RuntimeError("No feature columns detected (empty after excluding keys/target/weight)")
 
     print(f"[memmap] features detected = {len(feat_cols)} (excluding keys/target/weight)")
     print(f"[memmap] keys={keys}, target={target}, weight={weight}")
