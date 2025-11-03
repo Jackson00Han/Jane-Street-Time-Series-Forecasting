@@ -18,6 +18,7 @@ Thumbs.db
 
 # --- Notebooks ---
 .ipynb_checkpoints/
+
 experiments/
 
 # --- Build / Packaging ---
