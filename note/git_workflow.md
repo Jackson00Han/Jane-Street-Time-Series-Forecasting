@@ -12,7 +12,9 @@ cd <project_name>
 git switch dev
 
 # If you don’t have a local dev branch yet:
-git checkout -b dev origin/dev
+git switch -c dev origin/main
+
+git push -u origin dev
 ```
 
 ## 3. Before you start: update your local code
