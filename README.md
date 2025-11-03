@@ -89,6 +89,6 @@ js-train
 
 ## Results
 
-Example outputs are available in the [`reports`](./reports/) folder. These are for reference only—you can likely improve them by further tuning in `config.yaml`.
+Example outputs are available in the [`reports`](./reports/) folder. These are for reference only—you can improve them by further tuning through `config.yaml`.
 
 
