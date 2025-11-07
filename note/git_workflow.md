@@ -58,7 +58,15 @@ git push -u origin feature/xxx
 
 ## 8. Keep your branch in sync with main (repeat during dev)
 
-A) Rebase (linear, cleaner PR)
+A) Merge (no history rewrite)
+```bash
+git switch feature/xxx
+git fetch origin --prune
+git merge origin/main
+git push
+```
+
+B) Rebase (linear, cleaner PR)
 ```bash
 git switch feature/xxx
 git fetch origin --prune
@@ -67,13 +75,7 @@ git rebase origin/main
 git push --force-with-lease
 ```
 
-B) Merge (no history rewrite)
-```bash
-git switch feature/xxx
-git fetch origin --prune
-git merge origin/main
-git push
-```
+
 
 ## 9 After merge: start next work
 Want next PR to include only new changes:
