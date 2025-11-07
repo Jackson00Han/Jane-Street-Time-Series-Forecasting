@@ -1,4 +1,4 @@
-# Git Workflow Checklist for Feature Development
+# Git Workflow Checklist 
 
 ## 1.  Clone the repository
 ```bash
@@ -6,53 +6,44 @@ git clone <repo_url>
 cd <project_name>
 ```
 
-## 2. Switch to the development branch
+## 2. Initialize local main
 
 ```bash
-git switch dev
-
-# If you don’t have a local dev branch yet:
-git checkout -b dev origin/dev
+git fetch origin --prune
+git switch -c main origin/main   # If main exists: git switch main && git pull
 ```
 
 ## 3. Before you start: update your local code
 ```bash
-git switch dev
+git switch main
 git fetch origin --prune
-git rebase origin/dev    # or: git pull --rebase --autostash
+git pull --rebase --autostash    # same effect as: git rebase origin/main
+
 
 ```
 
-## 4. Start a new feature: create a branch
+## 4. Start a feature branch (from latest main)
 
 ```bash
-git switch dev
-git fetch origin
-git rebase origin/dev
-git switch -c feature/xxx
+git switch -c feature/xxx origin/main
+
 ```
 
 ## 5.During development
 ```bash
-# Inspect changes after editing
+# Inspect changes
 git status
 git diff
-```
 
+# Stage changes (prefer interactive / explicit)
+git add -p           # or: git add <file1> <file2>
 
-```bash
-# Stage changes (prefer explicit files or -p)
-git add -p
-# or, if you must:
-# git add .
-```
-
-```bash
 # Commit
 git commit -m "feat: describe the feature"
+
 ```
 
-## 6. Push to remote
+## 6. First push (set upstream)
 ```bash
 # First push: set upstream so later you can just `git push`
 git push -u origin feature/xxx
@@ -65,23 +56,35 @@ git push -u origin feature/xxx
 
 * After code review is approved, merge.
 
-## 8. Sync with the latest dev (dev by team, feature/xxx by yourself)
+## 8. Keep your branch in sync with main (repeat during dev)
+
+A) Rebase (linear, cleaner PR)
 ```bash
-# do it on your feature branch directly
 git switch feature/xxx
 git fetch origin --prune
-git rebase origin/dev           # or: git merge origin/dev
-
+git rebase origin/main
+# if conflicts: fix -> git add <file> -> git rebase --continue
+git push --force-with-lease
 ```
 
-## 9.Clean up stale branches
+B) Merge (no history rewrite)
 ```bash
-# Delete local branch
-git branch -d feature/xxx
+git switch feature/xxx
+git fetch origin --prune
+git merge origin/main
+git push
+```
 
-# Delete remote branch
-git push origin --delete feature/xxx
+## 9 After merge: start next work
+Want next PR to include only new changes:
+```bash
+git switch -c feature/xxx-next origin/main
+```
+Or continue on the same branch (first sync with main as in step 8).
 
-# Prune local tracking refs that no longer exist on remote
-git fetch --prune
+## Clean up stale branches (when no longer needed)
+```bash
+git branch -d feature/xxx                 # local
+git push origin --delete feature/xxx      # remote
+git fetch --prune                         # prune tracking refs
 ```
