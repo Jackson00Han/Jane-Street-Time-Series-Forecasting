@@ -76,7 +76,6 @@ git push --force-with-lease
 ```
 
 
-
 ## 9 After merge: start next work
 Want next PR to include only new changes:
 ```bash
